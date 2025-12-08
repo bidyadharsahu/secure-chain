@@ -1,4 +1,4 @@
-                                                                                     SecureChainPay 
+                                                            SecureChainPay 
 
 A full-fledged blockchain payment dApp for sending and receiving ERC-20 tokens (SCP - SecureChainPay Token) on the Ethereum Sepolia testnet. Built with Next.js, TypeScript, Solidity, Chainlink, and Supabase.
 
