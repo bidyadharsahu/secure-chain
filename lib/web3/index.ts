@@ -1,6 +1,6 @@
 import { BrowserProvider, Contract, parseUnits, formatUnits } from 'ethers';
-import { SCPTokenABI } from './contracts/SCPTokenABI';
-import { SecureChainPaymentABI } from './contracts/SecureChainPaymentABI';
+import { SCPTokenABI } from '../contracts/SCPTokenABI';
+import { SecureChainPaymentABI } from '../contracts/SecureChainPaymentABI';
 
 // Network configuration
 export const SEPOLIA_CHAIN_ID = 11155111;

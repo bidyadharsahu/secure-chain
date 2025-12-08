@@ -1,4 +1,4 @@
-import { supabase, Transaction } from './client';
+import { supabase, Transaction, UserProfile } from './client';
 
 /**
  * Link a wallet address to the current user
