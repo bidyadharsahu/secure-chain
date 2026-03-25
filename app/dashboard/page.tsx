@@ -1,7 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { isAddress } from 'ethers';
+import Link from 'next/link';
+import { AndroidBottomTabs, BottomTabKey } from '@/components/AndroidBottomTabs';
 import { useAuth } from '@/contexts/AuthContext';
 import { useWeb3 } from '@/contexts/Web3Context';
 import {
@@ -21,27 +24,60 @@ import {
   logEvent,
 } from '@/lib/supabase/database';
 import { Transaction } from '@/lib/supabase/client';
-import Link from 'next/link';
+import {
+  UPI_DIRECTORY,
+  UpiPayee,
+  getPayeeInitials,
+  normalizeUpiId,
+  resolveUpiPayee,
+  searchUpiPayees,
+} from '@/lib/upi/directory';
+
+type HomeMode = 'address' | 'upi' | 'collect';
+
+type ScanResult = {
+  address: string;
+  amount?: string;
+  note?: string;
+};
 
 export default function DashboardPage() {
-  const { user, walletAddress, signOut, linkedWallet, connectWallet } = useAuth();
+  const { user, walletAddress, signOut, connectWallet } = useAuth();
   const { isCorrectNetwork, switchNetwork } = useWeb3();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  const [balance, setBalance] = useState<string>('0');
-  const [ethUsdPrice, setEthUsdPrice] = useState<string>('0');
-  const [balanceUSD, setBalanceUSD] = useState<string>('0');
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const frameRef = useRef<number | null>(null);
+
+  const [balance, setBalance] = useState('0');
+  const [ethUsdPrice, setEthUsdPrice] = useState('0');
+  const [balanceUSD, setBalanceUSD] = useState('0');
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
-  
-  // Payment form state
+  const [chainBlock, setChainBlock] = useState('...');
+
+  const [homeMode, setHomeMode] = useState<HomeMode>('address');
+  const [activeTab, setActiveTab] = useState<BottomTabKey>('home');
+
   const [receiver, setReceiver] = useState('');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [upiId, setUpiId] = useState('');
+
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanError, setScanError] = useState('');
+  const [manualPayload, setManualPayload] = useState('');
+
   const [sending, setSending] = useState(false);
   const [claiming, setClaiming] = useState(false);
   const [approving, setApproving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  const upiSuggestions = useMemo(() => searchUpiPayees(upiId), [upiId]);
+  const resolvedUpiPayee = useMemo(() => resolveUpiPayee(upiId), [upiId]);
 
   useEffect(() => {
     if (!user) {
@@ -51,31 +87,299 @@ export default function DashboardPage() {
 
     if (walletAddress) {
       loadDashboardData();
+      loadChainPulse();
     }
   }, [user, walletAddress, router]);
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab === 'scan') {
+      setActiveTab('scan');
+      setCameraEnabled(true);
+    } else if (tab === 'profile') {
+      setActiveTab('profile');
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!cameraEnabled || activeTab !== 'scan') {
+      stopCamera();
+      return;
+    }
+
+    void startCamera();
+
+    return () => {
+      stopCamera();
+    };
+  }, [cameraEnabled, activeTab]);
+
+  const loadChainPulse = async () => {
+    try {
+      const response = await fetch('https://ethereum-sepolia-rpc.publicnode.com', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_blockNumber',
+          params: [],
+          id: 1,
+        }),
+      });
+
+      const data = await response.json();
+      if (data?.result) {
+        setChainBlock(parseInt(data.result, 16).toLocaleString());
+      }
+    } catch {
+      setChainBlock('n/a');
+    }
+  };
 
   const loadDashboardData = async () => {
     if (!walletAddress) return;
 
     try {
-      // Load balance
       const bal = await getSCPBalance(walletAddress);
       setBalance(bal);
 
-      // Load ETH/USD price
       const price = await getETHUSDPrice();
       setEthUsdPrice(price);
 
-      // Convert balance to USD
       const usd = await convertSCPToUSD(bal);
       setBalanceUSD(usd);
 
-      // Load recent transactions
       const { transactions } = await getRecentTransactions(5);
       setRecentTransactions(transactions || []);
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     }
+  };
+
+  const resetForms = () => {
+    setReceiver('');
+    setAmount('');
+    setNote('');
+    setUpiId('');
+    setScanResult(null);
+    setManualPayload('');
+  };
+
+  const executePayment = async (
+    finalReceiver: string,
+    finalAmount: string,
+    finalNote: string,
+    mode: string
+  ) => {
+    if (!isAddress(finalReceiver)) {
+      setError('Receiver wallet address is invalid');
+      return;
+    }
+
+    if (!finalAmount || Number(finalAmount) <= 0) {
+      setError('Enter a valid amount greater than 0');
+      return;
+    }
+
+    try {
+      setSending(true);
+      setError('');
+      setSuccess('');
+
+      const currentPrice = await getETHUSDPrice();
+      const receipt = await sendPayment(finalReceiver, finalAmount, finalNote);
+
+      await saveTransaction({
+        tx_hash: receipt.hash,
+        sender_address: walletAddress!,
+        receiver_address: finalReceiver,
+        amount: finalAmount,
+        note: finalNote,
+        status: 'pending',
+        eth_usd_price: currentPrice,
+      });
+
+      await updateTransactionStatus(
+        receipt.hash,
+        'confirmed',
+        receipt.blockNumber,
+        Number(receipt.gasUsed),
+        receipt.gasPrice?.toString()
+      );
+
+      setSuccess(`Payment confirmed on-chain. Tx: ${receipt.hash}`);
+      await logEvent('payment_sent', {
+        tx_hash: receipt.hash,
+        receiver: finalReceiver,
+        amount: finalAmount,
+        mode,
+      });
+
+      resetForms();
+      await loadDashboardData();
+      await loadChainPulse();
+    } catch (err: any) {
+      setError(err.message || 'Payment failed');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const parseQrPayload = (payload: string): ScanResult | null => {
+    const trimmed = payload.trim();
+    if (!trimmed) return null;
+
+    try {
+      if (trimmed.startsWith('{')) {
+        const parsed = JSON.parse(trimmed);
+        if (parsed?.address) {
+          return {
+            address: parsed.address,
+            amount: parsed.amount,
+            note: parsed.note,
+          };
+        }
+      }
+    } catch {
+      // Continue with other payload formats.
+    }
+
+    if (trimmed.startsWith('scp://pay?')) {
+      const query = trimmed.replace('scp://pay?', '');
+      const params = new URLSearchParams(query);
+      const address = params.get('address');
+      if (!address) return null;
+      return {
+        address,
+        amount: params.get('amount') || undefined,
+        note: params.get('note') || undefined,
+      };
+    }
+
+    if (trimmed.startsWith('upi://pay?')) {
+      const query = trimmed.replace('upi://pay?', '');
+      const params = new URLSearchParams(query);
+      const upi = params.get('pa') || '';
+      const payee = resolveUpiPayee(upi);
+      if (!payee) return null;
+      return {
+        address: payee.walletAddress,
+        amount: params.get('am') || undefined,
+        note: params.get('tn') || params.get('pn') || undefined,
+      };
+    }
+
+    if (trimmed.startsWith('0x')) {
+      return { address: trimmed };
+    }
+
+    return null;
+  };
+
+  const handleQrDetected = (rawValue: string) => {
+    const parsed = parseQrPayload(rawValue);
+    if (!parsed) {
+      setScanError('Unsupported QR payload. Try a SecureChain QR.');
+      return;
+    }
+
+    setScanResult(parsed);
+    setAmount(parsed.amount || amount);
+    setNote(parsed.note || note);
+    setSuccess('QR scanned successfully. Review and pay.');
+    setScanError('');
+    setCameraEnabled(false);
+  };
+
+  const startCamera = async () => {
+    if (!videoRef.current) return;
+
+    if (!('BarcodeDetector' in window)) {
+      setScanError('Live camera scanning is not supported in this browser. Use manual payload parsing.');
+      return;
+    }
+
+    try {
+      setScanError('');
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+
+      const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+
+      const scanLoop = async () => {
+        if (!videoRef.current || videoRef.current.readyState < 2) {
+          frameRef.current = requestAnimationFrame(() => {
+            void scanLoop();
+          });
+          return;
+        }
+
+        try {
+          const barcodes = await detector.detect(videoRef.current);
+          const rawValue = barcodes[0]?.rawValue;
+          if (rawValue) {
+            handleQrDetected(rawValue);
+            return;
+          }
+        } catch {
+          setScanError('Could not read QR from camera feed.');
+        }
+
+        frameRef.current = requestAnimationFrame(() => {
+          void scanLoop();
+        });
+      };
+
+      frameRef.current = requestAnimationFrame(() => {
+        void scanLoop();
+      });
+    } catch {
+      setScanError('Unable to access camera. Please allow camera permission.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const handleAddressPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await executePayment(receiver, amount, note, 'address');
+  };
+
+  const handleUpiPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const payee = resolveUpiPayee(upiId);
+    if (!payee) {
+      setError('UPI ID not found. Pick a verified payee from suggestions.');
+      return;
+    }
+
+    await executePayment(
+      payee.walletAddress,
+      amount,
+      `UPI:${payee.upiId}${note ? ` | ${note}` : ''}`,
+      'upi'
+    );
   };
 
   const handleClaimFaucet = async () => {
@@ -85,8 +389,7 @@ export default function DashboardPage() {
       setSuccess('');
 
       const receipt = await claimFromFaucet();
-      setSuccess(`Successfully claimed 100 SCP! Tx: ${receipt.hash}`);
-      
+      setSuccess(`Successfully claimed 100 SCP. Tx: ${receipt.hash}`);
       await logEvent('faucet_claimed', { tx_hash: receipt.hash });
       await loadDashboardData();
     } catch (err: any) {
@@ -101,11 +404,8 @@ export default function DashboardPage() {
       setApproving(true);
       setError('');
       setSuccess('');
-
-      // Approve a large amount for convenience
       await approveSCPTokens('1000000');
-      setSuccess('Successfully approved SCP tokens for transfers!');
-      
+      setSuccess('Successfully approved SCP tokens for transfers');
       await logEvent('tokens_approved');
     } catch (err: any) {
       setError(err.message || 'Failed to approve tokens');
@@ -114,64 +414,15 @@ export default function DashboardPage() {
     }
   };
 
-  const handleSendPayment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
-    if (!receiver || !amount) {
-      setError('Please fill in all required fields');
+  const handleBottomTabChange = (tab: BottomTabKey) => {
+    if (tab === 'history') {
+      router.push('/transactions');
       return;
     }
 
-    try {
-      setSending(true);
-      setError('');
-      setSuccess('');
-
-      // Get current ETH/USD price
-      const currentPrice = await getETHUSDPrice();
-
-      // Send payment transaction
-      const receipt = await sendPayment(receiver, amount, note);
-
-      // Save to database
-      const savedTx = await saveTransaction({
-        tx_hash: receipt.hash,
-        sender_address: walletAddress!,
-        receiver_address: receiver,
-        amount: amount,
-        note: note,
-        status: 'pending',
-        eth_usd_price: currentPrice,
-      });
-
-      // Update status to confirmed
-      await updateTransactionStatus(
-        receipt.hash,
-        'confirmed',
-        receipt.blockNumber,
-        Number(receipt.gasUsed),
-        receipt.gasPrice?.toString()
-      );
-
-      setSuccess(`Payment sent successfully! Tx: ${receipt.hash}`);
-      
-      await logEvent('payment_sent', {
-        tx_hash: receipt.hash,
-        receiver,
-        amount,
-      });
-
-      // Reset form
-      setReceiver('');
-      setAmount('');
-      setNote('');
-
-      // Reload data
-      await loadDashboardData();
-    } catch (err: any) {
-      setError(err.message || 'Failed to send payment');
-    } finally {
-      setSending(false);
+    setActiveTab(tab);
+    if (tab === 'scan') {
+      setCameraEnabled(true);
     }
   };
 
@@ -181,15 +432,13 @@ export default function DashboardPage() {
 
   if (!walletAddress) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-        <div className="max-w-md w-full bg-white rounded-xl shadow-lg p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">Connect Your Wallet</h2>
-          <p className="text-gray-600 mb-6">
-            Please connect your MetaMask wallet to access the dashboard.
-          </p>
+      <div className="min-h-screen px-4 py-8">
+        <div className="wallet-shell rounded-[28px] soft-card p-8">
+          <h2 className="text-2xl font-bold text-[var(--ink-900)] mb-4">Connect Wallet</h2>
+          <p className="text-[var(--text-soft)] mb-6">Please connect MetaMask to access your blockchain wallet dashboard.</p>
           <button
             onClick={connectWallet}
-            className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-3 px-4 rounded-lg font-semibold hover:from-purple-700 hover:to-indigo-700 transition duration-200"
+            className="w-full action-button bg-[var(--ink-900)] text-white py-3 px-4 rounded-xl font-semibold hover:bg-[var(--ink-700)]"
           >
             Connect MetaMask
           </button>
@@ -198,229 +447,378 @@ export default function DashboardPage() {
     );
   }
 
+  const collectPayload = `scp://pay?address=${walletAddress}&note=${encodeURIComponent('SecureChain transfer')}`;
+
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white shadow">
-        <div className="container mx-auto px-4 py-4">
-          <div className="flex justify-between items-center">
-            <h1 className="text-2xl font-bold text-gray-900">SecureChainPay</h1>
-            <div className="flex items-center space-x-4">
-              <Link
-                href="/transactions"
-                className="text-gray-600 hover:text-gray-900 font-medium"
-              >
-                Transactions
-              </Link>
-              <button
-                onClick={signOut}
-                className="text-gray-600 hover:text-gray-900 font-medium"
-              >
-                Sign Out
-              </button>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Network Warning */}
-      {!isCorrectNetwork && (
-        <div className="bg-yellow-50 border-b border-yellow-200">
-          <div className="container mx-auto px-4 py-3">
-            <div className="flex items-center justify-between">
-              <p className="text-yellow-800">
-                ⚠️ Please switch to Sepolia testnet to use this app
-              </p>
-              <button
-                onClick={switchNetwork}
-                className="bg-yellow-600 text-white px-4 py-2 rounded-lg hover:bg-yellow-700 transition"
-              >
-                Switch Network
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="container mx-auto px-4 py-8">
-        {/* Wallet Info Card */}
-        <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
-          <div className="flex justify-between items-start mb-4">
+    <div className="min-h-screen px-3 py-4 md:py-8">
+      <div className="wallet-shell rounded-[30px] soft-card">
+        <header className="wallet-topbar px-5 pt-6 pb-7 rounded-t-[30px]">
+          <div className="flex items-start justify-between mb-4">
             <div>
-              <h2 className="text-sm text-gray-600 mb-1">Your Wallet</h2>
-              <p className="text-lg font-mono text-gray-900">{formatAddress(walletAddress, 8)}</p>
+              <p className="text-xs uppercase tracking-[0.22em] text-white/70">Secure Chain Wallet</p>
+              <h1 className="text-2xl font-bold mt-1">Pay on Blockchain</h1>
             </div>
-            <div className="text-right">
-              <p className="text-sm text-gray-600 mb-1">ETH/USD Price</p>
-              <p className="text-lg font-semibold text-green-600">${parseFloat(ethUsdPrice).toFixed(2)}</p>
-            </div>
-          </div>
-          
-          <div className="border-t pt-4">
-            <p className="text-sm text-gray-600 mb-2">SCP Balance</p>
-            <div className="flex items-baseline justify-between">
-              <p className="text-4xl font-bold text-gray-900">{parseFloat(balance).toFixed(2)} <span className="text-2xl text-gray-600">SCP</span></p>
-              <p className="text-xl text-gray-600">≈ ${balanceUSD}</p>
-            </div>
-          </div>
-
-          <div className="mt-6 flex gap-4">
-            <button
-              onClick={handleClaimFaucet}
-              disabled={claiming || !isCorrectNetwork}
-              className="flex-1 bg-green-600 text-white py-2 px-4 rounded-lg hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {claiming ? 'Claiming...' : 'Claim 100 SCP (Faucet)'}
-            </button>
-            <button
-              onClick={handleApprove}
-              disabled={approving || !isCorrectNetwork}
-              className="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {approving ? 'Approving...' : 'Approve Tokens'}
+            <button onClick={signOut} className="text-xs bg-white/20 px-3 py-2 rounded-xl hover:bg-white/30">
+              Logout
             </button>
           </div>
-        </div>
 
-        <div className="grid lg:grid-cols-2 gap-8">
-          {/* Send Payment Form */}
-          <div className="bg-white rounded-xl shadow-lg p-6">
-            <h2 className="text-xl font-bold text-gray-900 mb-6">Send Payment</h2>
-            
-            <form onSubmit={handleSendPayment} className="space-y-4">
+          <div className="glass-card p-4">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-white/80">Wallet</span>
+              <span className="font-mono">{formatAddress(walletAddress, 6)}</span>
+            </div>
+            <div className="mt-3 flex items-end justify-between">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Receiver Address *
-                </label>
-                <input
-                  type="text"
-                  value={receiver}
-                  onChange={(e) => setReceiver(e.target.value)}
-                  placeholder="0x..."
-                  required
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-600 focus:border-transparent outline-none text-gray-900"
-                />
+                <p className="text-xs text-white/70">SCP Balance</p>
+                <p className="text-3xl font-bold leading-tight">{parseFloat(balance).toFixed(2)}</p>
+                <p className="text-sm text-white/75">~ ${balanceUSD}</p>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Amount (SCP) *
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  placeholder="0.00"
-                  required
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-600 focus:border-transparent outline-none text-gray-900"
-                />
+              <div className="text-right">
+                <p className="text-xs text-white/75">ETH/USD</p>
+                <p className="font-semibold">${parseFloat(ethUsdPrice).toFixed(2)}</p>
               </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Note (Optional)
-                </label>
-                <textarea
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  placeholder="Payment for..."
-                  rows={3}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-600 focus:border-transparent outline-none resize-none text-gray-900"
-                />
-              </div>
-
-              {error && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-4">
-                  <p className="text-red-800 text-sm">{error}</p>
-                </div>
-              )}
-
-              {success && (
-                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                  <p className="text-green-800 text-sm">{success}</p>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={sending || !isCorrectNetwork}
-                className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 text-white py-3 px-4 rounded-lg font-semibold hover:from-purple-700 hover:to-indigo-700 transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {sending ? 'Sending...' : 'Send Payment'}
-              </button>
-            </form>
+            </div>
           </div>
 
-          {/* Recent Transactions */}
-          <div className="bg-white rounded-xl shadow-lg p-6">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-xl font-bold text-gray-900">Recent Transactions</h2>
-              <Link
-                href="/transactions"
-                className="text-purple-600 hover:text-purple-700 font-medium text-sm"
-              >
-                View All →
-              </Link>
+          <div className="mt-4 flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2 text-white/90">
+              <span className={`pulse-dot ${isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
+              <span>{isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
             </div>
+            <span className="text-white/75">Block #{chainBlock}</span>
+          </div>
+        </header>
 
-            <div className="space-y-3">
-              {recentTransactions.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">No transactions yet</p>
-              ) : (
-                recentTransactions.map((tx) => (
-                  <div
-                    key={tx.id}
-                    className="border border-gray-200 rounded-lg p-4 hover:border-purple-300 transition"
+        {!isCorrectNetwork && (
+          <div className="mx-4 mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-center justify-between gap-3">
+            <span>Switch to Sepolia to make payments.</span>
+            <button onClick={switchNetwork} className="bg-amber-600 text-white text-xs px-3 py-2 rounded-xl">
+              Switch
+            </button>
+          </div>
+        )}
+
+        <main className="px-4 pb-24 pt-4">
+          {activeTab === 'home' && (
+            <div className="animate-screen-enter">
+              <div className="grid grid-cols-2 gap-3 mb-4">
+                <button
+                  onClick={handleClaimFaucet}
+                  disabled={claiming || !isCorrectNetwork}
+                  className="action-button rounded-2xl bg-[var(--mint-500)] text-white p-3 text-sm font-semibold disabled:opacity-50"
+                >
+                  {claiming ? 'Claiming...' : 'Claim Faucet'}
+                </button>
+                <button
+                  onClick={handleApprove}
+                  disabled={approving || !isCorrectNetwork}
+                  className="action-button rounded-2xl bg-[var(--ink-700)] text-white p-3 text-sm font-semibold disabled:opacity-50"
+                >
+                  {approving ? 'Approving...' : 'Approve SCP'}
+                </button>
+              </div>
+
+              <div className="soft-card p-4 mb-4">
+                <h2 className="font-bold text-[var(--ink-900)] mb-3">Pay Modes</h2>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  {[
+                    { key: 'address', label: 'Address' },
+                    { key: 'upi', label: 'UPI ID' },
+                    { key: 'collect', label: 'Collect' },
+                  ].map((mode) => (
+                    <button
+                      key={mode.key}
+                      onClick={() => setHomeMode(mode.key as HomeMode)}
+                      className={`rounded-xl px-2 py-2 font-semibold ${
+                        homeMode === mode.key ? 'bg-[var(--ink-900)] text-white' : 'bg-[var(--cloud-100)] text-[var(--ink-700)]'
+                      }`}
+                    >
+                      {mode.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {homeMode === 'address' && (
+                <form onSubmit={handleAddressPayment} className="soft-card p-4 mb-4 space-y-3">
+                  <h3 className="font-bold text-[var(--ink-900)]">Pay by Wallet Address</h3>
+                  <input
+                    type="text"
+                    value={receiver}
+                    onChange={(e) => setReceiver(e.target.value)}
+                    placeholder="Receiver wallet 0x..."
+                    required
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Amount in SCP"
+                    required
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+                  <input
+                    type="text"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="Note (optional)"
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+                  <button
+                    type="submit"
+                    disabled={sending || !isCorrectNetwork}
+                    className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
-                    <div className="flex justify-between items-start mb-2">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">
-                          {tx.sender_address.toLowerCase() === walletAddress.toLowerCase()
-                            ? '→ Sent'
-                            : '← Received'}
-                        </p>
-                        <p className="text-xs text-gray-500 mt-1">
-                          {tx.sender_address.toLowerCase() === walletAddress.toLowerCase()
-                            ? `To: ${formatAddress(tx.receiver_address)}`
-                            : `From: ${formatAddress(tx.sender_address)}`}
-                        </p>
+                    {sending ? 'Processing on chain...' : 'Pay Now'}
+                  </button>
+                </form>
+              )}
+
+              {homeMode === 'upi' && (
+                <form onSubmit={handleUpiPayment} className="soft-card p-4 mb-4 space-y-3">
+                  <h3 className="font-bold text-[var(--ink-900)]">Pay by UPI ID</h3>
+                  <input
+                    type="text"
+                    value={upiId}
+                    onChange={(e) => setUpiId(normalizeUpiId(e.target.value))}
+                    placeholder="example: coffee@scp"
+                    required
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+
+                  {resolvedUpiPayee && (
+                    <div className="rounded-xl border border-[var(--cloud-200)] bg-[var(--cloud-100)] p-3 flex items-center gap-3">
+                      <div className={`w-11 h-11 rounded-full bg-gradient-to-br ${resolvedUpiPayee.accent} text-white grid place-items-center font-bold`}>
+                        {getPayeeInitials(resolvedUpiPayee.name)}
                       </div>
-                      <div className="text-right">
-                        <p className="text-sm font-semibold text-gray-900">
-                          {parseFloat(tx.amount).toFixed(2)} SCP
-                        </p>
-                        <span
-                          className={`text-xs px-2 py-1 rounded-full ${
-                            tx.status === 'confirmed'
-                              ? 'bg-green-100 text-green-800'
-                              : tx.status === 'pending'
-                              ? 'bg-yellow-100 text-yellow-800'
-                              : 'bg-red-100 text-red-800'
-                          }`}
+                      <div>
+                        <p className="text-sm font-semibold text-[var(--ink-900)]">{resolvedUpiPayee.name}</p>
+                        <p className="text-xs text-[var(--text-soft)]">{resolvedUpiPayee.upiId} · {resolvedUpiPayee.bank}</p>
+                      </div>
+                      {resolvedUpiPayee.verified && <span className="ml-auto text-[10px] bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">Verified</span>}
+                    </div>
+                  )}
+
+                  {upiSuggestions.length > 0 && !resolvedUpiPayee && (
+                    <div className="rounded-xl border border-[var(--cloud-200)] p-2 space-y-2">
+                      {upiSuggestions.slice(0, 4).map((payee: UpiPayee) => (
+                        <button
+                          key={payee.id}
+                          type="button"
+                          onClick={() => setUpiId(payee.upiId)}
+                          className="w-full text-left p-2 rounded-lg hover:bg-[var(--cloud-100)] flex items-center gap-2"
                         >
-                          {tx.status}
-                        </span>
+                          <div className={`w-8 h-8 rounded-full bg-gradient-to-br ${payee.accent} text-white grid place-items-center text-xs font-bold`}>
+                            {getPayeeInitials(payee.name)}
+                          </div>
+                          <div>
+                            <p className="text-xs font-semibold text-[var(--ink-900)]">{payee.name}</p>
+                            <p className="text-[11px] text-[var(--text-soft)]">{payee.upiId}</p>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Amount in SCP"
+                    required
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+                  <input
+                    type="text"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="Note (optional)"
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+                  <p className="text-xs text-[var(--text-soft)]">Popular: {UPI_DIRECTORY.map((d) => d.upiId).slice(0, 3).join(', ')}</p>
+                  <button
+                    type="submit"
+                    disabled={sending || !isCorrectNetwork}
+                    className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
+                  >
+                    {sending ? 'Processing on chain...' : 'Pay by UPI ID'}
+                  </button>
+                </form>
+              )}
+
+              {homeMode === 'collect' && (
+                <div className="soft-card p-4 mb-4">
+                  <h3 className="font-bold text-[var(--ink-900)] mb-2">Your Receive QR</h3>
+                  <p className="text-xs text-[var(--text-soft)] mb-3">Share this QR to receive SCP payments.</p>
+                  <div className="bg-white rounded-2xl p-4 border border-[var(--cloud-200)] w-fit mx-auto">
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(collectPayload)}`}
+                      alt="Receive QR"
+                      className="w-[220px] h-[220px] rounded-xl"
+                    />
+                  </div>
+                  <p className="mt-3 text-xs font-mono break-all text-[var(--text-soft)]">{collectPayload}</p>
+                </div>
+              )}
+
+              <div className="soft-card p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-bold text-[var(--ink-900)]">Recent On-Chain Activity</h3>
+                  <Link href="/transactions" className="text-xs font-semibold text-[var(--ink-700)] hover:underline">
+                    View all
+                  </Link>
+                </div>
+                <div className="space-y-3">
+                  {recentTransactions.length === 0 ? (
+                    <p className="text-sm text-[var(--text-soft)]">No transactions yet.</p>
+                  ) : (
+                    recentTransactions.map((tx) => (
+                      <div key={tx.id} className="rounded-xl border border-[var(--cloud-200)] bg-white p-3">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <p className="text-sm font-semibold text-[var(--ink-900)]">
+                              {tx.sender_address.toLowerCase() === walletAddress.toLowerCase() ? 'Sent' : 'Received'}
+                            </p>
+                            <p className="text-xs text-[var(--text-soft)] mt-1">
+                              {tx.sender_address.toLowerCase() === walletAddress.toLowerCase()
+                                ? `To ${formatAddress(tx.receiver_address, 5)}`
+                                : `From ${formatAddress(tx.sender_address, 5)}`}
+                            </p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-sm font-bold text-[var(--ink-900)]">{parseFloat(tx.amount).toFixed(2)} SCP</p>
+                            <span className={`text-[10px] px-2 py-1 rounded-full ${tx.status === 'confirmed' ? 'bg-emerald-100 text-emerald-700' : tx.status === 'pending' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}`}>
+                              {tx.status}
+                            </span>
+                          </div>
+                        </div>
+                        <a href={getEtherscanUrl(tx.tx_hash)} target="_blank" rel="noopener noreferrer" className="text-xs mt-2 inline-block text-[var(--ink-700)] hover:underline">
+                          Explorer: {formatAddress(tx.tx_hash, 5)}
+                        </a>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'scan' && (
+            <div className="animate-screen-enter soft-card p-4">
+              <h3 className="font-bold text-[var(--ink-900)] mb-2">Scan QR with Camera</h3>
+              <p className="text-xs text-[var(--text-soft)] mb-3">Live QR scan using browser camera and BarcodeDetector API.</p>
+
+              <div className="rounded-2xl overflow-hidden border border-[var(--cloud-200)] bg-slate-950 mb-3 relative">
+                <video ref={videoRef} className="w-full min-h-[260px] object-cover" playsInline muted />
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                  <div className="w-44 h-44 border-2 border-white/70 rounded-2xl" />
+                </div>
+                {!cameraEnabled && (
+                  <div className="absolute inset-0 grid place-items-center text-white/80 text-sm bg-black/30">
+                    Camera paused. Tap start to scan.
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-2 mb-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCameraEnabled(true);
+                    setScanError('');
+                  }}
+                  className="flex-1 bg-[var(--ink-900)] text-white py-2 rounded-xl text-sm font-semibold"
+                >
+                  Start Camera
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCameraEnabled(false)}
+                  className="flex-1 bg-[var(--cloud-100)] text-[var(--ink-700)] py-2 rounded-xl text-sm font-semibold"
+                >
+                  Stop Camera
+                </button>
+              </div>
+
+              <textarea
+                value={manualPayload}
+                onChange={(e) => setManualPayload(e.target.value)}
+                rows={3}
+                placeholder="Optional: paste payload if camera scan is unavailable"
+                className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+              />
+              <button
+                type="button"
+                onClick={() => handleQrDetected(manualPayload)}
+                className="mt-2 w-full bg-[var(--cloud-100)] text-[var(--ink-700)] py-2 rounded-xl text-sm font-semibold"
+              >
+                Parse Manual Payload
+              </button>
+
+              {scanError && <p className="text-xs text-red-700 mt-2">{scanError}</p>}
+
+              {scanResult && (
+                <div className="rounded-xl border border-[var(--cloud-200)] bg-[var(--cloud-100)] p-3 text-xs space-y-1 mt-3">
+                  <p><strong>Receiver:</strong> {formatAddress(scanResult.address, 6)}</p>
+                  <p><strong>Amount:</strong> {scanResult.amount || amount || 'Not set'}</p>
+                  <p><strong>Note:</strong> {scanResult.note || note || 'None'}</p>
+                  <button
+                    type="button"
+                    onClick={() => executePayment(scanResult.address, scanResult.amount || amount, scanResult.note || note || 'QR Payment', 'qr')}
+                    disabled={sending || !isCorrectNetwork}
+                    className="mt-2 w-full bg-[var(--ink-900)] text-white py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
+                  >
+                    {sending ? 'Processing on chain...' : 'Pay Scanned QR'}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'profile' && (
+            <div className="animate-screen-enter space-y-4">
+              <div className="soft-card p-4">
+                <h3 className="font-bold text-[var(--ink-900)]">Wallet Profile</h3>
+                <p className="text-xs text-[var(--text-soft)] mt-1">Your on-chain identity and payment handle.</p>
+                <div className="mt-3 rounded-xl bg-[var(--cloud-100)] border border-[var(--cloud-200)] p-3">
+                  <p className="text-xs text-[var(--text-soft)]">Primary Wallet</p>
+                  <p className="text-sm font-mono text-[var(--ink-900)] break-all mt-1">{walletAddress}</p>
+                </div>
+              </div>
+
+              <div className="soft-card p-4">
+                <h4 className="font-bold text-[var(--ink-900)] mb-2">Verified Payees</h4>
+                <div className="space-y-2 text-xs text-[var(--text-soft)]">
+                  {UPI_DIRECTORY.filter((item) => item.verified).slice(0, 4).map((item) => (
+                    <div key={item.id} className="rounded-lg border border-[var(--cloud-200)] p-2 flex items-center gap-2">
+                      <div className={`w-8 h-8 rounded-full bg-gradient-to-br ${item.accent} text-white grid place-items-center text-xs font-bold`}>
+                        {getPayeeInitials(item.name)}
+                      </div>
+                      <div>
+                        <p className="font-semibold text-[var(--ink-900)]">{item.upiId}</p>
+                        <p>{item.name}</p>
                       </div>
                     </div>
-                    {tx.note && (
-                      <p className="text-xs text-gray-600 mb-2">"{tx.note}"</p>
-                    )}
-                    <a
-                      href={getEtherscanUrl(tx.tx_hash)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-purple-600 hover:text-purple-700 font-mono"
-                    >
-                      {formatAddress(tx.tx_hash, 6)} ↗
-                    </a>
-                  </div>
-                ))
-              )}
+                  ))}
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          )}
+
+          {(error || success) && (
+            <div className={`mb-4 rounded-xl px-4 py-3 text-sm mt-4 ${error ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+              {error || success}
+            </div>
+          )}
+        </main>
+
+        <AndroidBottomTabs activeTab={activeTab} onChange={handleBottomTabChange} />
       </div>
     </div>
   );

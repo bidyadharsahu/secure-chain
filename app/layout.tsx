@@ -1,9 +1,10 @@
 import type { Metadata } from 'next';
-import { Inter } from 'next/font/google';
+import { Sora, Space_Grotesk } from 'next/font/google';
 import './globals.css';
 import { Providers } from './providers';
 
-const inter = Inter({ subsets: ['latin'] });
+const sora = Sora({ subsets: ['latin'], variable: '--font-sora' });
+const spaceGrotesk = Space_Grotesk({ subsets: ['latin'], variable: '--font-space-grotesk' });
 
 export const metadata: Metadata = {
   title: 'SecureChainPay - Blockchain Payment Platform',
@@ -17,7 +18,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={inter.className}>
+      <body className={`${sora.variable} ${spaceGrotesk.variable} font-[var(--font-sora)]`}>
         <Providers>
           {children}
         </Providers>
