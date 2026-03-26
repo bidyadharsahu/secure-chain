@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import Link from 'next/link';
 
@@ -10,22 +10,34 @@ export default function HomePage() {
   const [password, setPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
   const [error, setError] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const [loading, setLoading] = useState(false);
 
   const { signIn, signUp, user, connectWallet, walletAddress } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    if (searchParams.get('confirmed') === '1') {
+      setSuccessMessage('Thank you for confirming your email. You can now continue in the app.');
+    }
+  }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+    setSuccessMessage('');
     setLoading(true);
 
     try {
       if (isSignUp) {
         await signUp(email, password);
-        alert('Sign up successful. Please verify your email.');
+        setSuccessMessage(
+          'Account created. Please check your email and click the confirmation link to activate your account.'
+        );
       } else {
         await signIn(email, password);
+        setSuccessMessage('Signed in successfully. Redirecting...');
         router.push('/dashboard');
       }
     } catch (err: any) {
@@ -38,6 +50,7 @@ export default function HomePage() {
   const handleConnectWallet = async () => {
     try {
       setError('');
+      setSuccessMessage('');
       await connectWallet();
       if (user) {
         router.push('/dashboard');
@@ -136,6 +149,12 @@ export default function HomePage() {
               </p>
             </div>
 
+            {successMessage && (
+              <div className="mb-4 bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+                <p className="text-emerald-800 text-sm">{successMessage}</p>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label htmlFor="email" className="block text-sm font-medium text-[var(--ink-700)] mb-2">
@@ -179,13 +198,17 @@ export default function HomePage() {
                 disabled={loading}
                 className="w-full bg-[var(--ink-900)] text-white py-3 px-4 rounded-xl font-semibold hover:bg-[var(--ink-700)] transition disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {loading ? 'Processing...' : isSignUp ? 'Sign Up' : 'Sign In'}
+                {loading ? (isSignUp ? 'Creating Account...' : 'Signing In...') : isSignUp ? 'Sign Up' : 'Sign In'}
               </button>
             </form>
 
             <div className="mt-6 text-center">
               <button
-                onClick={() => setIsSignUp(!isSignUp)}
+                onClick={() => {
+                  setIsSignUp(!isSignUp);
+                  setError('');
+                  setSuccessMessage('');
+                }}
                 className="text-[var(--ink-700)] hover:text-[var(--ink-900)] font-medium"
               >
                 {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
