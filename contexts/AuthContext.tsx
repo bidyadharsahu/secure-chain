@@ -155,7 +155,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       // If user is logged in, link wallet to user
       if (user) {
-        await linkWalletToUser(address);
+        try {
+          await linkWalletToUser(address);
+        } catch (linkError) {
+          console.warn('Wallet connected but could not persist wallet link in Supabase:', linkError);
+        }
         setLinkedWallet(address);
         await logEvent('wallet_linked', { wallet_address: address });
       }

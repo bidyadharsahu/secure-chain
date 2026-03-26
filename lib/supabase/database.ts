@@ -1,5 +1,14 @@
 import { supabase, Transaction, UserProfile } from './client';
 
+function isMissingTableError(error: any): boolean {
+  const message = String(error?.message || '').toLowerCase();
+  return (
+    message.includes('could not find the table') ||
+    message.includes('does not exist') ||
+    error?.code === 'PGRST205'
+  );
+}
+
 /**
  * Link a wallet address to the current user
  */
@@ -22,7 +31,13 @@ export async function linkWalletToUser(walletAddress: string) {
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) {
+      console.warn('Skipping wallet link because user_wallets table is missing in Supabase.');
+      return null;
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -43,6 +58,9 @@ export async function getUserWallet() {
     .single();
 
   if (error && error.code !== 'PGRST116') { // PGRST116 = not found
+    if (isMissingTableError(error)) {
+      return null;
+    }
     throw error;
   }
   
@@ -68,7 +86,13 @@ export async function saveTransaction(transaction: Partial<Transaction>) {
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) {
+      console.warn('Skipping transaction persistence because transactions table is missing in Supabase.');
+      return null;
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -100,7 +124,12 @@ export async function updateTransactionStatus(
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) {
+      return null;
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -119,7 +148,12 @@ export async function getTransactionsByWallet(
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) {
+      return { transactions: [], total: 0 };
+    }
+    throw error;
+  }
   return { transactions: data, total: count };
 }
 
@@ -147,6 +181,9 @@ export async function getTransactionByHash(txHash: string) {
     .single();
 
   if (error && error.code !== 'PGRST116') {
+    if (isMissingTableError(error)) {
+      return null;
+    }
     throw error;
   }
   
@@ -171,7 +208,9 @@ export async function logEvent(
       created_at: new Date().toISOString(),
     });
 
-  if (error) console.error('Failed to log event:', error);
+  if (error && !isMissingTableError(error)) {
+    console.error('Failed to log event:', error);
+  }
 }
 
 /**
@@ -191,6 +230,9 @@ export async function getUserProfile(userId?: string) {
     .single();
 
   if (error && error.code !== 'PGRST116') {
+    if (isMissingTableError(error)) {
+      return null;
+    }
     throw error;
   }
   
@@ -217,6 +259,11 @@ export async function updateUserProfile(profile: Partial<UserProfile>) {
     .select()
     .single();
 
-  if (error) throw error;
+  if (error) {
+    if (isMissingTableError(error)) {
+      return null;
+    }
+    throw error;
+  }
   return data;
 }
