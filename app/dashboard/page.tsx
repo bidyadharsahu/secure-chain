@@ -441,6 +441,22 @@ export default function DashboardPage() {
     }
   };
 
+  const handleConnectWalletClick = async () => {
+    try {
+      setError('');
+      setSuccess('');
+      await connectWallet();
+      setSuccess('Wallet connected successfully.');
+    } catch (err: any) {
+      const message = err?.message || 'Failed to connect wallet';
+      if (message.toLowerCase().includes('opening metamask app')) {
+        setSuccess(message);
+        return;
+      }
+      setError(message);
+    }
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen px-4 py-8">
@@ -463,7 +479,7 @@ export default function DashboardPage() {
           <h2 className="text-2xl font-bold text-[var(--ink-900)] mb-4">Connect Wallet</h2>
           <p className="text-[var(--text-soft)] mb-6">Please connect MetaMask to access your blockchain wallet dashboard.</p>
           <button
-            onClick={connectWallet}
+            onClick={handleConnectWalletClick}
             className="w-full action-button bg-[var(--ink-900)] text-white py-3 px-4 rounded-xl font-semibold hover:bg-[var(--ink-700)]"
           >
             Connect MetaMask

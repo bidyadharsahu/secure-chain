@@ -140,13 +140,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const connectWallet = async (): Promise<string> => {
-    if (!window.ethereum) {
-      throw new Error('MetaMask is not installed');
+    const isMobileBrowser = /android|iphone|ipad|ipod/i.test(navigator.userAgent || '');
+    const hasInjectedProvider = typeof window !== 'undefined' && Boolean(window.ethereum);
+
+    if (!hasInjectedProvider) {
+      if (isMobileBrowser) {
+        const dappUrl = window.location.href.replace(/^https?:\/\//, '');
+        window.location.href = `https://metamask.app.link/dapp/${dappUrl}`;
+        throw new Error('Opening MetaMask app. Approve connection there and return to continue.');
+      }
+
+      throw new Error('MetaMask is not installed. Install MetaMask extension or use MetaMask mobile app browser.');
     }
 
     try {
+      const provider: any =
+        (window.ethereum as any)?.providers?.find?.((p: any) => p?.isMetaMask) || window.ethereum;
+
       // Request account access
-      const accounts = await window.ethereum.request({
+      const accounts = await provider.request({
         method: 'eth_requestAccounts',
       });
 

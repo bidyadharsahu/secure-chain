@@ -57,7 +57,12 @@ export default function HomePage() {
         router.push('/dashboard');
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to connect wallet');
+      const message = err?.message || 'Failed to connect wallet';
+      if (message.toLowerCase().includes('opening metamask app')) {
+        setSuccessMessage(message);
+        return;
+      }
+      setError(message);
     }
   };
 
