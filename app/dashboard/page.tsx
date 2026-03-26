@@ -77,6 +77,9 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const showHomeTab = activeTab !== 'scan' && activeTab !== 'profile';
+  const scpTokenConfigured = Boolean(process.env.NEXT_PUBLIC_SCP_TOKEN_ADDRESS);
+  const paymentContractConfigured = Boolean(process.env.NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS);
+  const walletFeaturesReady = scpTokenConfigured && paymentContractConfigured;
 
   const validRecentTransactions = useMemo(
     () =>
@@ -256,6 +259,21 @@ export default function DashboardPage() {
     };
   }, [cameraEnabled, activeTab, startCamera, stopCamera]);
 
+  useEffect(() => {
+    if (!walletAddress) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadDashboardData();
+      void loadChainPulse();
+    }, 20000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [walletAddress, loadDashboardData, loadChainPulse]);
+
   const resetForms = () => {
     setReceiver('');
     setAmount('');
@@ -271,6 +289,11 @@ export default function DashboardPage() {
     finalNote: string,
     mode: string
   ) => {
+    if (!paymentContractConfigured) {
+      setError('Payment contract address is not configured yet. Add NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS in Vercel.');
+      return;
+    }
+
     if (!isAddress(finalReceiver)) {
       setError('Receiver wallet address is invalid');
       return;
@@ -399,6 +422,11 @@ export default function DashboardPage() {
   };
 
   const handleClaimFaucet = async () => {
+    if (!scpTokenConfigured) {
+      setError('SCP token address is not configured yet. Add NEXT_PUBLIC_SCP_TOKEN_ADDRESS in Vercel.');
+      return;
+    }
+
     try {
       setClaiming(true);
       setError('');
@@ -416,6 +444,11 @@ export default function DashboardPage() {
   };
 
   const handleApprove = async () => {
+    if (!walletFeaturesReady) {
+      setError('SCP token and payment contract addresses must be configured before approval.');
+      return;
+    }
+
     try {
       setApproving(true);
       setError('');
@@ -545,21 +578,33 @@ export default function DashboardPage() {
         <main className="px-4 pb-24 pt-4">
           {showHomeTab && (
             <div className="animate-screen-enter">
+              {!walletFeaturesReady && (
+                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                  <p className="font-semibold">Setup required for full on-chain mode</p>
+                  <p className="mt-1">Missing: {!scpTokenConfigured ? 'NEXT_PUBLIC_SCP_TOKEN_ADDRESS ' : ''}{!paymentContractConfigured ? 'NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS' : ''}</p>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <button
                   onClick={handleClaimFaucet}
-                  disabled={claiming || !isCorrectNetwork}
+                  disabled={claiming || !isCorrectNetwork || !scpTokenConfigured}
                   className="action-button rounded-2xl bg-[var(--mint-500)] text-white p-3 text-sm font-semibold disabled:opacity-50"
                 >
                   {claiming ? 'Claiming...' : 'Claim Faucet'}
                 </button>
                 <button
                   onClick={handleApprove}
-                  disabled={approving || !isCorrectNetwork}
+                  disabled={approving || !isCorrectNetwork || !walletFeaturesReady}
                   className="action-button rounded-2xl bg-[var(--ink-700)] text-white p-3 text-sm font-semibold disabled:opacity-50"
                 >
                   {approving ? 'Approving...' : 'Approve SCP'}
                 </button>
+              </div>
+
+              <div className="soft-card p-4 mb-4 text-xs text-[var(--text-soft)]">
+                <p><strong>Claim Faucet:</strong> mints free demo SCP tokens to your wallet for testing.</p>
+                <p className="mt-1"><strong>Approve SCP:</strong> allows the payment contract to spend SCP on your behalf while sending payments.</p>
               </div>
 
               <div className="soft-card p-4 mb-4">
@@ -613,7 +658,7 @@ export default function DashboardPage() {
                   />
                   <button
                     type="submit"
-                    disabled={sending || !isCorrectNetwork}
+                    disabled={sending || !isCorrectNetwork || !walletFeaturesReady}
                     className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay Now'}
@@ -687,7 +732,7 @@ export default function DashboardPage() {
                   <p className="text-xs text-[var(--text-soft)]">Popular: {UPI_DIRECTORY.map((d) => d.upiId).slice(0, 3).join(', ')}</p>
                   <button
                     type="submit"
-                    disabled={sending || !isCorrectNetwork}
+                    disabled={sending || !isCorrectNetwork || !walletFeaturesReady}
                     className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay by UPI ID'}
@@ -823,7 +868,7 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     onClick={() => executePayment(scanResult.address, scanResult.amount || amount, scanResult.note || note || 'QR Payment', 'qr')}
-                    disabled={sending || !isCorrectNetwork}
+                    disabled={sending || !isCorrectNetwork || !walletFeaturesReady}
                     className="mt-2 w-full bg-[var(--ink-900)] text-white py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay Scanned QR'}
