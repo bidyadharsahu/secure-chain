@@ -61,7 +61,7 @@ interface AndroidBottomTabsProps {
 export function AndroidBottomTabs({ activeTab, onChange }: AndroidBottomTabsProps) {
   return (
     <div className="fixed bottom-3 left-0 right-0 px-4 md:px-0 z-40">
-      <div className="wallet-shell mx-auto rounded-3xl border border-[var(--cloud-200)] bg-white/95 p-2 shadow-xl backdrop-blur">
+      <div className="max-w-[450px] mx-auto rounded-3xl border border-[var(--cloud-200)] bg-white/95 p-2 shadow-xl backdrop-blur">
         <div className="grid grid-cols-4 gap-1 relative">
           {TAB_ITEMS.map((tab) => {
             const isActive = activeTab === tab.key;
