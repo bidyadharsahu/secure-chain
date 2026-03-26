@@ -43,7 +43,7 @@ type ScanResult = {
 };
 
 export default function DashboardPage() {
-  const { user, walletAddress, signOut, connectWallet } = useAuth();
+  const { user, walletAddress, signOut, connectWallet, loading: authLoading } = useAuth();
   const { isCorrectNetwork, switchNetwork } = useWeb3();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -76,6 +76,19 @@ export default function DashboardPage() {
   const [approving, setApproving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+
+  const validRecentTransactions = useMemo(
+    () =>
+      recentTransactions.filter(
+        (tx) =>
+          Boolean(tx?.id) &&
+          Boolean(tx?.tx_hash) &&
+          Boolean(tx?.sender_address) &&
+          Boolean(tx?.receiver_address) &&
+          Boolean(tx?.amount)
+      ),
+    [recentTransactions]
+  );
 
   const upiSuggestions = useMemo(() => searchUpiPayees(upiId), [upiId]);
   const resolvedUpiPayee = useMemo(() => resolveUpiPayee(upiId), [upiId]);
@@ -428,6 +441,17 @@ export default function DashboardPage() {
     }
   };
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen px-4 py-8">
+        <div className="wallet-shell rounded-[28px] soft-card p-8 text-center">
+          <h2 className="text-xl font-bold text-[var(--ink-900)] mb-2">Loading wallet home...</h2>
+          <p className="text-[var(--text-soft)]">Preparing your dashboard and latest on-chain state.</p>
+        </div>
+      </div>
+    );
+  }
+
   if (!user) {
     return null;
   }
@@ -680,20 +704,25 @@ export default function DashboardPage() {
                   </Link>
                 </div>
                 <div className="space-y-3">
-                  {recentTransactions.length === 0 ? (
+                  {validRecentTransactions.length === 0 ? (
                     <p className="text-sm text-[var(--text-soft)]">No transactions yet.</p>
                   ) : (
-                    recentTransactions.map((tx) => (
+                    validRecentTransactions.map((tx) => {
+                      const sender = tx.sender_address || '';
+                      const receiver = tx.receiver_address || '';
+                      const isSender = sender.toLowerCase() === walletAddress.toLowerCase();
+
+                      return (
                       <div key={tx.id} className="rounded-xl border border-[var(--cloud-200)] bg-white p-3">
                         <div className="flex justify-between items-start">
                           <div>
                             <p className="text-sm font-semibold text-[var(--ink-900)]">
-                              {tx.sender_address.toLowerCase() === walletAddress.toLowerCase() ? 'Sent' : 'Received'}
+                              {isSender ? 'Sent' : 'Received'}
                             </p>
                             <p className="text-xs text-[var(--text-soft)] mt-1">
-                              {tx.sender_address.toLowerCase() === walletAddress.toLowerCase()
-                                ? `To ${formatAddress(tx.receiver_address, 5)}`
-                                : `From ${formatAddress(tx.sender_address, 5)}`}
+                              {isSender
+                                ? `To ${formatAddress(receiver, 5)}`
+                                : `From ${formatAddress(sender, 5)}`}
                             </p>
                           </div>
                           <div className="text-right">
@@ -707,7 +736,8 @@ export default function DashboardPage() {
                           Explorer: {formatAddress(tx.tx_hash, 5)}
                         </a>
                       </div>
-                    ))
+                    );
+                    })
                   )}
                 </div>
               </div>

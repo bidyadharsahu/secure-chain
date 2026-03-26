@@ -11,6 +11,7 @@ interface AuthContextType {
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
+  resendConfirmation: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   connectWallet: () => Promise<string>;
   linkedWallet: string | null;
@@ -112,6 +113,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await logEvent('user_signout');
   };
 
+  const resendConfirmation = async (email: string) => {
+    if (!isSupabaseConfigured) {
+      throw new Error('Supabase is not configured. Add environment variables and redeploy the app.');
+    }
+
+    const emailRedirectTo =
+      typeof window !== 'undefined'
+        ? `${window.location.origin}/auth/callback?confirmed=1`
+        : undefined;
+
+    const { error } = await supabase.auth.resend({
+      type: 'signup',
+      email,
+      options: {
+        emailRedirectTo,
+      },
+    });
+
+    if (error?.message?.toLowerCase().includes('failed to fetch')) {
+      throw new Error('Unable to reach authentication server. Check internet, Supabase URL/key, and Vercel environment variables.');
+    }
+
+    if (error) throw error;
+    await logEvent('user_resend_confirmation', { email });
+  };
+
   const connectWallet = async (): Promise<string> => {
     if (!window.ethereum) {
       throw new Error('MetaMask is not installed');
@@ -146,6 +173,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     loading,
     signIn,
     signUp,
+    resendConfirmation,
     signOut,
     connectWallet,
     linkedWallet,

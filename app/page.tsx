@@ -12,8 +12,9 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
 
-  const { signIn, signUp, user, connectWallet, walletAddress } = useAuth();
+  const { signIn, signUp, resendConfirmation, user, connectWallet, walletAddress } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -57,6 +58,26 @@ export default function HomePage() {
       }
     } catch (err: any) {
       setError(err.message || 'Failed to connect wallet');
+    }
+  };
+
+  const handleResendConfirmation = async () => {
+    setError('');
+    setSuccessMessage('');
+
+    if (!email.trim()) {
+      setError('Please enter your email address first, then click resend confirmation.');
+      return;
+    }
+
+    try {
+      setResendLoading(true);
+      await resendConfirmation(email.trim());
+      setSuccessMessage('Confirmation email sent. Please check your inbox and spam folder.');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to resend confirmation email.');
+    } finally {
+      setResendLoading(false);
     }
   };
 
@@ -213,6 +234,19 @@ export default function HomePage() {
               >
                 {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
               </button>
+
+              {!isSignUp && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    onClick={handleResendConfirmation}
+                    disabled={resendLoading}
+                    className="text-sm text-[var(--ink-700)] hover:text-[var(--ink-900)] underline disabled:opacity-60"
+                  >
+                    {resendLoading ? 'Sending confirmation email...' : 'Resend confirmation email'}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </section>
