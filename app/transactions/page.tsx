@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AndroidBottomTabs, BottomTabKey } from '@/components/AndroidBottomTabs';
@@ -22,18 +22,7 @@ export default function TransactionsPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'sent' | 'received'>('all');
 
-  useEffect(() => {
-    if (!user) {
-      router.push('/');
-      return;
-    }
-
-    if (walletAddress) {
-      loadTransactions();
-    }
-  }, [user, walletAddress, currentPage, router]);
-
-  const loadTransactions = async () => {
+  const loadTransactions = useCallback(async () => {
     if (!walletAddress) return;
 
     try {
@@ -51,7 +40,18 @@ export default function TransactionsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [walletAddress, currentPage]);
+
+  useEffect(() => {
+    if (!user) {
+      router.push('/');
+      return;
+    }
+
+    if (walletAddress) {
+      void loadTransactions();
+    }
+  }, [user, walletAddress, router, loadTransactions]);
 
   const filteredTransactions = transactions.filter((tx) => {
     if (filter === 'all') return true;

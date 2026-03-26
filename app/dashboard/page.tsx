@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import Image from 'next/image';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { isAddress } from 'ethers';
 import Link from 'next/link';
@@ -79,6 +80,133 @@ export default function DashboardPage() {
   const upiSuggestions = useMemo(() => searchUpiPayees(upiId), [upiId]);
   const resolvedUpiPayee = useMemo(() => resolveUpiPayee(upiId), [upiId]);
 
+  const loadChainPulse = useCallback(async () => {
+    try {
+      const response = await fetch('https://ethereum-sepolia-rpc.publicnode.com', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'eth_blockNumber',
+          params: [],
+          id: 1,
+        }),
+      });
+
+      const data = await response.json();
+      if (data?.result) {
+        setChainBlock(parseInt(data.result, 16).toLocaleString());
+      }
+    } catch {
+      setChainBlock('n/a');
+    }
+  }, []);
+
+  const loadDashboardData = useCallback(async () => {
+    if (!walletAddress) return;
+
+    try {
+      const bal = await getSCPBalance(walletAddress);
+      setBalance(bal);
+
+      const price = await getETHUSDPrice();
+      setEthUsdPrice(price);
+
+      const usd = await convertSCPToUSD(bal);
+      setBalanceUSD(usd);
+
+      const { transactions } = await getRecentTransactions(5);
+      setRecentTransactions(transactions || []);
+    } catch (err) {
+      console.error('Failed to load dashboard data:', err);
+    }
+  }, [walletAddress]);
+
+  const handleQrDetected = useCallback((rawValue: string) => {
+    const parsed = parseQrPayload(rawValue);
+    if (!parsed) {
+      setScanError('Unsupported QR payload. Try a SecureChain QR.');
+      return;
+    }
+
+    setScanResult(parsed);
+    setAmount((previousAmount) => parsed.amount || previousAmount);
+    setNote((previousNote) => parsed.note || previousNote);
+    setSuccess('QR scanned successfully. Review and pay.');
+    setScanError('');
+    setCameraEnabled(false);
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    if (!videoRef.current) return;
+
+    if (!('BarcodeDetector' in window)) {
+      setScanError('Live camera scanning is not supported in this browser. Use manual payload parsing.');
+      return;
+    }
+
+    try {
+      setScanError('');
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+
+      streamRef.current = stream;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+
+      const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+
+      const scanLoop = async () => {
+        if (!videoRef.current || videoRef.current.readyState < 2) {
+          frameRef.current = requestAnimationFrame(() => {
+            void scanLoop();
+          });
+          return;
+        }
+
+        try {
+          const barcodes = await detector.detect(videoRef.current);
+          const rawValue = barcodes[0]?.rawValue;
+          if (rawValue) {
+            handleQrDetected(rawValue);
+            return;
+          }
+        } catch {
+          setScanError('Could not read QR from camera feed.');
+        }
+
+        frameRef.current = requestAnimationFrame(() => {
+          void scanLoop();
+        });
+      };
+
+      frameRef.current = requestAnimationFrame(() => {
+        void scanLoop();
+      });
+    } catch {
+      setScanError('Unable to access camera. Please allow camera permission.');
+    }
+  }, [handleQrDetected]);
+
   useEffect(() => {
     if (!user) {
       router.push('/');
@@ -86,10 +214,10 @@ export default function DashboardPage() {
     }
 
     if (walletAddress) {
-      loadDashboardData();
-      loadChainPulse();
+      void loadDashboardData();
+      void loadChainPulse();
     }
-  }, [user, walletAddress, router]);
+  }, [user, walletAddress, router, loadDashboardData, loadChainPulse]);
 
   useEffect(() => {
     const tab = searchParams.get('tab');
@@ -112,49 +240,7 @@ export default function DashboardPage() {
     return () => {
       stopCamera();
     };
-  }, [cameraEnabled, activeTab]);
-
-  const loadChainPulse = async () => {
-    try {
-      const response = await fetch('https://ethereum-sepolia-rpc.publicnode.com', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          method: 'eth_blockNumber',
-          params: [],
-          id: 1,
-        }),
-      });
-
-      const data = await response.json();
-      if (data?.result) {
-        setChainBlock(parseInt(data.result, 16).toLocaleString());
-      }
-    } catch {
-      setChainBlock('n/a');
-    }
-  };
-
-  const loadDashboardData = async () => {
-    if (!walletAddress) return;
-
-    try {
-      const bal = await getSCPBalance(walletAddress);
-      setBalance(bal);
-
-      const price = await getETHUSDPrice();
-      setEthUsdPrice(price);
-
-      const usd = await convertSCPToUSD(bal);
-      setBalanceUSD(usd);
-
-      const { transactions } = await getRecentTransactions(5);
-      setRecentTransactions(transactions || []);
-    } catch (err) {
-      console.error('Failed to load dashboard data:', err);
-    }
-  };
+  }, [cameraEnabled, activeTab, startCamera, stopCamera]);
 
   const resetForms = () => {
     setReceiver('');
@@ -276,90 +362,6 @@ export default function DashboardPage() {
     return null;
   };
 
-  const handleQrDetected = (rawValue: string) => {
-    const parsed = parseQrPayload(rawValue);
-    if (!parsed) {
-      setScanError('Unsupported QR payload. Try a SecureChain QR.');
-      return;
-    }
-
-    setScanResult(parsed);
-    setAmount(parsed.amount || amount);
-    setNote(parsed.note || note);
-    setSuccess('QR scanned successfully. Review and pay.');
-    setScanError('');
-    setCameraEnabled(false);
-  };
-
-  const startCamera = async () => {
-    if (!videoRef.current) return;
-
-    if (!('BarcodeDetector' in window)) {
-      setScanError('Live camera scanning is not supported in this browser. Use manual payload parsing.');
-      return;
-    }
-
-    try {
-      setScanError('');
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
-        audio: false,
-      });
-
-      streamRef.current = stream;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-
-      const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
-
-      const scanLoop = async () => {
-        if (!videoRef.current || videoRef.current.readyState < 2) {
-          frameRef.current = requestAnimationFrame(() => {
-            void scanLoop();
-          });
-          return;
-        }
-
-        try {
-          const barcodes = await detector.detect(videoRef.current);
-          const rawValue = barcodes[0]?.rawValue;
-          if (rawValue) {
-            handleQrDetected(rawValue);
-            return;
-          }
-        } catch {
-          setScanError('Could not read QR from camera feed.');
-        }
-
-        frameRef.current = requestAnimationFrame(() => {
-          void scanLoop();
-        });
-      };
-
-      frameRef.current = requestAnimationFrame(() => {
-        void scanLoop();
-      });
-    } catch {
-      setScanError('Unable to access camera. Please allow camera permission.');
-    }
-  };
-
-  const stopCamera = () => {
-    if (frameRef.current !== null) {
-      cancelAnimationFrame(frameRef.current);
-      frameRef.current = null;
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-  };
 
   const handleAddressPayment = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -657,9 +659,12 @@ export default function DashboardPage() {
                   <h3 className="font-bold text-[var(--ink-900)] mb-2">Your Receive QR</h3>
                   <p className="text-xs text-[var(--text-soft)] mb-3">Share this QR to receive SCP payments.</p>
                   <div className="bg-white rounded-2xl p-4 border border-[var(--cloud-200)] w-fit mx-auto">
-                    <img
+                    <Image
                       src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(collectPayload)}`}
                       alt="Receive QR"
+                      width={220}
+                      height={220}
+                      unoptimized
                       className="w-[220px] h-[220px] rounded-xl"
                     />
                   </div>
