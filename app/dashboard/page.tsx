@@ -76,6 +76,7 @@ export default function DashboardPage() {
   const [approving, setApproving] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const showHomeTab = activeTab !== 'scan' && activeTab !== 'profile';
 
   const validRecentTransactions = useMemo(
     () =>
@@ -542,7 +543,7 @@ export default function DashboardPage() {
         )}
 
         <main className="px-4 pb-24 pt-4">
-          {activeTab === 'home' && (
+          {showHomeTab && (
             <div className="animate-screen-enter">
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <button
