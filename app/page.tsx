@@ -1,9 +1,9 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
-import Link from 'next/link';
 
 export default function HomePage() {
   const [email, setEmail] = useState('');
@@ -13,14 +13,36 @@ export default function HomePage() {
   const [successMessage, setSuccessMessage] = useState('');
   const [loading, setLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [signOutLoading, setSignOutLoading] = useState(false);
 
-  const { signIn, signUp, resendConfirmation, user, connectWallet, walletAddress } = useAuth();
+  const {
+    signIn,
+    signUp,
+    resendConfirmation,
+    requestPasswordReset,
+    signOut,
+    user,
+    connectWallet,
+    walletAddress,
+  } = useAuth();
+
   const router = useRouter();
   const searchParams = useSearchParams();
 
   useEffect(() => {
     if (searchParams.get('confirmed') === '1') {
       setSuccessMessage('Thank you for confirming your email. You can now continue in the app.');
+      return;
+    }
+
+    if (searchParams.get('password_reset') === '1') {
+      setSuccessMessage('Password updated successfully. Please sign in with your new password.');
+      return;
+    }
+
+    if (searchParams.get('reset_error') === '1') {
+      setError('Reset link is invalid or expired. Please request a new password reset email.');
     }
   }, [searchParams]);
 
@@ -31,18 +53,29 @@ export default function HomePage() {
     setLoading(true);
 
     try {
+      const normalizedEmail = email.trim();
+
       if (isSignUp) {
-        await signUp(email, password);
-        setSuccessMessage(
-          'Account created. Please check your email and click the confirmation link to activate your account.'
-        );
+        const result = await signUp(normalizedEmail, password);
+        if (result.requiresEmailConfirmation) {
+          setSuccessMessage(
+            'Account created. Confirmation email sent. Please check inbox/spam and use resend if needed.'
+          );
+        } else {
+          setSuccessMessage('Account created and signed in. Redirecting...');
+          router.push('/dashboard');
+        }
       } else {
-        await signIn(email, password);
+        await signIn(normalizedEmail, password);
         setSuccessMessage('Signed in successfully. Redirecting...');
         router.push('/dashboard');
       }
     } catch (err: any) {
-      setError(err.message || 'Authentication failed');
+      const message = err?.message || 'Authentication failed';
+      if (isSignUp && message.toLowerCase().includes('already have an account')) {
+        setIsSignUp(false);
+      }
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -70,19 +103,59 @@ export default function HomePage() {
     setError('');
     setSuccessMessage('');
 
-    if (!email.trim()) {
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
       setError('Please enter your email address first, then click resend confirmation.');
       return;
     }
 
     try {
       setResendLoading(true);
-      await resendConfirmation(email.trim());
+      await resendConfirmation(normalizedEmail);
       setSuccessMessage('Confirmation email sent. Please check your inbox and spam folder.');
     } catch (err: any) {
       setError(err?.message || 'Failed to resend confirmation email.');
     } finally {
       setResendLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    setError('');
+    setSuccessMessage('');
+
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail) {
+      setError('Please enter your email address first, then click forgot password.');
+      return;
+    }
+
+    try {
+      setForgotLoading(true);
+      await requestPasswordReset(normalizedEmail);
+      setSuccessMessage('Password reset email sent. Check inbox/spam and open the link to set a new password.');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to send password reset email.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const handleSignOutAndSwitch = async () => {
+    setError('');
+    setSuccessMessage('');
+
+    try {
+      setSignOutLoading(true);
+      await signOut();
+      setPassword('');
+      setIsSignUp(false);
+      setSuccessMessage('Signed out. You can now sign in with another account.');
+      router.push('/');
+    } catch (err: any) {
+      setError(err?.message || 'Failed to sign out. Please try again.');
+    } finally {
+      setSignOutLoading(false);
     }
   };
 
@@ -96,7 +169,7 @@ export default function HomePage() {
             <p className="text-white/75 mt-2 text-sm">Sign-in verified for {user.email}</p>
           </div>
 
-          <div className="p-6">
+          <div className="p-6 space-y-4">
             {!walletAddress ? (
               <div className="soft-card p-5 space-y-4">
                 <p className="text-sm text-[var(--text-soft)]">
@@ -127,8 +200,17 @@ export default function HomePage() {
               </div>
             )}
 
+            <button
+              type="button"
+              onClick={handleSignOutAndSwitch}
+              disabled={signOutLoading}
+              className="w-full border border-[var(--cloud-200)] text-[var(--ink-900)] py-3 px-4 rounded-xl font-semibold hover:bg-[var(--cloud-100)] transition disabled:opacity-60"
+            >
+              {signOutLoading ? 'Signing out...' : 'Sign out / Use another account'}
+            </button>
+
             {error && (
-              <div className="mt-4 bg-red-50 border border-red-200 rounded-xl p-4">
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4">
                 <p className="text-red-800 text-sm">{error}</p>
               </div>
             )}
@@ -240,18 +322,27 @@ export default function HomePage() {
                 {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
               </button>
 
-              {!isSignUp && (
-                <div className="mt-3">
+              <div className="mt-3 flex flex-col gap-2">
+                <button
+                  type="button"
+                  onClick={handleResendConfirmation}
+                  disabled={resendLoading}
+                  className="text-sm text-[var(--ink-700)] hover:text-[var(--ink-900)] underline disabled:opacity-60"
+                >
+                  {resendLoading ? 'Sending confirmation email...' : 'Resend confirmation email'}
+                </button>
+
+                {!isSignUp && (
                   <button
                     type="button"
-                    onClick={handleResendConfirmation}
-                    disabled={resendLoading}
+                    onClick={handleForgotPassword}
+                    disabled={forgotLoading}
                     className="text-sm text-[var(--ink-700)] hover:text-[var(--ink-900)] underline disabled:opacity-60"
                   >
-                    {resendLoading ? 'Sending confirmation email...' : 'Resend confirmation email'}
+                    {forgotLoading ? 'Sending reset email...' : 'Forgot password?'}
                   </button>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         </section>

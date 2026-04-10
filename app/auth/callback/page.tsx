@@ -38,6 +38,7 @@ export default function AuthCallbackPage() {
         const code = searchParams.get('code');
         const tokenHash = searchParams.get('token_hash');
         const tokenType = searchParams.get('type');
+        const isResetFlow = searchParams.get('reset') === '1' || tokenType === 'recovery';
 
         // Supabase may return either an OAuth code or OTP token hash in confirmation links.
         if (code) {
@@ -69,9 +70,25 @@ export default function AuthCallbackPage() {
         }
 
         if (session?.user) {
+          if (isResetFlow) {
+            setMessage('Reset link verified. Redirecting to password update...');
+            window.setTimeout(() => {
+              router.replace('/auth/reset-password');
+            }, REDIRECT_DELAY_MS);
+            return;
+          }
+
           setMessage('Thank you for confirming your email. Redirecting you to the app...');
           window.setTimeout(() => {
             router.replace('/dashboard?confirmed=1');
+          }, REDIRECT_DELAY_MS);
+          return;
+        }
+
+        if (isResetFlow) {
+          setMessage('Reset link is invalid or expired. Please request another reset email.');
+          window.setTimeout(() => {
+            router.replace('/?reset_error=1');
           }, REDIRECT_DELAY_MS);
           return;
         }

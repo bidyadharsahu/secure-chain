@@ -10,8 +10,9 @@ interface AuthContextType {
   walletAddress: string | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string) => Promise<{ requiresEmailConfirmation: boolean }>;
   resendConfirmation: (email: string) => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   connectWallet: () => Promise<string>;
   linkedWallet: string | null;
@@ -33,6 +34,42 @@ const isAuthNetworkError = (message?: string) => {
 
 const authNetworkErrorMessage =
   'Unable to reach authentication server. Verify Supabase URL/key in Vercel and ensure values are valid (no quotes or placeholder values).';
+
+const getAuthErrorMessage = (error: { message?: string } | null) => {
+  const message = error?.message || '';
+  const normalized = message.toLowerCase();
+
+  if (!message) {
+    return 'Authentication failed. Please try again.';
+  }
+
+  if (isAuthNetworkError(message)) {
+    return authNetworkErrorMessage;
+  }
+
+  if (normalized.includes('rate limit') || normalized.includes('too many requests')) {
+    return 'Too many email requests. Please wait a minute and try again.';
+  }
+
+  if (
+    normalized.includes('already registered') ||
+    normalized.includes('already been registered') ||
+    normalized.includes('already exists') ||
+    normalized.includes('user already')
+  ) {
+    return 'This email already has an account. Please go to login.';
+  }
+
+  if (
+    normalized.includes('error sending confirmation email') ||
+    normalized.includes('smtp') ||
+    normalized.includes('email provider')
+  ) {
+    return 'Could not send confirmation email. In Supabase, enable Email provider and configure SMTP settings.';
+  }
+
+  return message;
+};
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -86,11 +123,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     });
 
-    if (isAuthNetworkError(error?.message)) {
-      throw new Error(authNetworkErrorMessage);
+    if (error) {
+      throw new Error(getAuthErrorMessage(error));
     }
-
-    if (error) throw error;
     await logEvent('user_signin', { email });
   };
 
@@ -104,7 +139,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ? `${window.location.origin}/auth/callback?confirmed=1`
         : undefined;
 
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -112,12 +147,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
     });
 
-    if (isAuthNetworkError(error?.message)) {
-      throw new Error(authNetworkErrorMessage);
+    if (error) {
+      throw new Error(getAuthErrorMessage(error));
     }
 
-    if (error) throw error;
-    await logEvent('user_signup', { email });
+    const requiresEmailConfirmation = !data.session;
+    await logEvent('user_signup', { email, requires_email_confirmation: requiresEmailConfirmation });
+
+    return { requiresEmailConfirmation };
   };
 
   const signOut = async () => {
@@ -146,12 +183,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
     });
 
-    if (isAuthNetworkError(error?.message)) {
-      throw new Error(authNetworkErrorMessage);
+    if (error) {
+      throw new Error(getAuthErrorMessage(error));
+    }
+    await logEvent('user_resend_confirmation', { email });
+  };
+
+  const requestPasswordReset = async (email: string) => {
+    if (!isSupabaseConfigured) {
+      throw new Error(getSupabaseConfigError());
     }
 
-    if (error) throw error;
-    await logEvent('user_resend_confirmation', { email });
+    const redirectTo =
+      typeof window !== 'undefined' ? `${window.location.origin}/auth/callback?reset=1` : undefined;
+
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo,
+    });
+
+    if (error) {
+      throw new Error(getAuthErrorMessage(error));
+    }
+
+    await logEvent('user_password_reset_requested', { email });
   };
 
   const connectWallet = async (): Promise<string> => {
@@ -205,6 +259,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     signIn,
     signUp,
     resendConfirmation,
+    requestPasswordReset,
     signOut,
     connectWallet,
     linkedWallet,
