@@ -1,16 +1,57 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey =
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY;
+const normalizeEnvValue = (value?: string) => {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  return trimmed.replace(/^['"]|['"]$/g, '');
+};
 
-export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
+const hasPlaceholderValue = (value: string) =>
+  /your_|your-|placeholder|example|changeme|xxxx/i.test(value);
+
+const isValidHttpsUrl = (value?: string) => {
+  if (!value) return false;
+
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+const supabaseUrl = normalizeEnvValue(process.env.NEXT_PUBLIC_SUPABASE_URL);
+const supabaseAnonKey = normalizeEnvValue(
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY
+);
+
+const configIssues: string[] = [];
+
+if (!supabaseUrl) {
+  configIssues.push('NEXT_PUBLIC_SUPABASE_URL is missing');
+} else if (!isValidHttpsUrl(supabaseUrl) || hasPlaceholderValue(supabaseUrl)) {
+  configIssues.push('NEXT_PUBLIC_SUPABASE_URL is invalid');
+}
+
+if (!supabaseAnonKey) {
+  configIssues.push(
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY (or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY) is missing'
+  );
+} else if (hasPlaceholderValue(supabaseAnonKey)) {
+  configIssues.push(
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY (or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY) contains a placeholder value'
+  );
+}
+
+export const isSupabaseConfigured = configIssues.length === 0;
+export const supabaseConfigMessage = isSupabaseConfigured
+  ? ''
+  : `Supabase is not configured correctly: ${configIssues.join('; ')}. Update environment variables and redeploy.`;
 
 if (!isSupabaseConfigured) {
-  console.warn(
-    'Supabase environment variables are missing. Configure NEXT_PUBLIC_SUPABASE_URL and either NEXT_PUBLIC_SUPABASE_ANON_KEY or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY for full functionality.'
-  );
+  console.warn(supabaseConfigMessage);
 }
 
 export const supabase = createClient(

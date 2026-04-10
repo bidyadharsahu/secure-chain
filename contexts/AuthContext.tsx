@@ -1,7 +1,7 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState } from 'react';
-import { isSupabaseConfigured, supabase } from '@/lib/supabase/client';
+import { isSupabaseConfigured, supabase, supabaseConfigMessage } from '@/lib/supabase/client';
 import { User } from '@supabase/supabase-js';
 import { linkWalletToUser, getUserWallet, logEvent } from '@/lib/supabase/database';
 
@@ -18,6 +18,21 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+const getSupabaseConfigError = () =>
+  supabaseConfigMessage || 'Supabase is not configured. Add environment variables and redeploy the app.';
+
+const isAuthNetworkError = (message?: string) => {
+  const normalized = message?.toLowerCase() || '';
+  return (
+    normalized.includes('failed to fetch') ||
+    normalized.includes('fetch failed') ||
+    normalized.includes('networkerror')
+  );
+};
+
+const authNetworkErrorMessage =
+  'Unable to reach authentication server. Verify Supabase URL/key in Vercel and ensure values are valid (no quotes or placeholder values).';
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -63,7 +78,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signIn = async (email: string, password: string) => {
     if (!isSupabaseConfigured) {
-      throw new Error('Supabase is not configured. Add environment variables and redeploy the app.');
+      throw new Error(getSupabaseConfigError());
     }
 
     const { error } = await supabase.auth.signInWithPassword({
@@ -71,8 +86,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       password,
     });
 
-    if (error?.message?.toLowerCase().includes('failed to fetch')) {
-      throw new Error('Unable to reach authentication server. Check internet, Supabase URL/key, and Vercel environment variables.');
+    if (isAuthNetworkError(error?.message)) {
+      throw new Error(authNetworkErrorMessage);
     }
 
     if (error) throw error;
@@ -81,7 +96,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signUp = async (email: string, password: string) => {
     if (!isSupabaseConfigured) {
-      throw new Error('Supabase is not configured. Add environment variables and redeploy the app.');
+      throw new Error(getSupabaseConfigError());
     }
 
     const emailRedirectTo =
@@ -97,8 +112,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
     });
 
-    if (error?.message?.toLowerCase().includes('failed to fetch')) {
-      throw new Error('Unable to reach authentication server. Check internet, Supabase URL/key, and Vercel environment variables.');
+    if (isAuthNetworkError(error?.message)) {
+      throw new Error(authNetworkErrorMessage);
     }
 
     if (error) throw error;
@@ -115,7 +130,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const resendConfirmation = async (email: string) => {
     if (!isSupabaseConfigured) {
-      throw new Error('Supabase is not configured. Add environment variables and redeploy the app.');
+      throw new Error(getSupabaseConfigError());
     }
 
     const emailRedirectTo =
@@ -131,8 +146,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
     });
 
-    if (error?.message?.toLowerCase().includes('failed to fetch')) {
-      throw new Error('Unable to reach authentication server. Check internet, Supabase URL/key, and Vercel environment variables.');
+    if (isAuthNetworkError(error?.message)) {
+      throw new Error(authNetworkErrorMessage);
     }
 
     if (error) throw error;

@@ -2,7 +2,21 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { supabase } from '@/lib/supabase/client';
+import type { EmailOtpType } from '@supabase/supabase-js';
+import { isSupabaseConfigured, supabase, supabaseConfigMessage } from '@/lib/supabase/client';
+
+const REDIRECT_DELAY_MS = 1200;
+const EMAIL_OTP_TYPES: EmailOtpType[] = [
+  'signup',
+  'magiclink',
+  'recovery',
+  'invite',
+  'email_change',
+  'email',
+];
+
+const isEmailOtpType = (value: string | null): value is EmailOtpType =>
+  Boolean(value && EMAIL_OTP_TYPES.includes(value as EmailOtpType));
 
 export default function AuthCallbackPage() {
   const router = useRouter();
@@ -14,6 +28,33 @@ export default function AuthCallbackPage() {
 
     const finalizeAuth = async () => {
       try {
+        if (!isSupabaseConfigured) {
+          throw new Error(
+            supabaseConfigMessage || 'Supabase is not configured correctly. Update environment variables and redeploy.'
+          );
+        }
+
+        const searchParams = new URLSearchParams(window.location.search);
+        const code = searchParams.get('code');
+        const tokenHash = searchParams.get('token_hash');
+        const tokenType = searchParams.get('type');
+
+        // Supabase may return either an OAuth code or OTP token hash in confirmation links.
+        if (code) {
+          const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
+          if (exchangeError) {
+            throw exchangeError;
+          }
+        } else if (tokenHash && isEmailOtpType(tokenType)) {
+          const { error: verifyError } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: tokenType,
+          });
+          if (verifyError) {
+            throw verifyError;
+          }
+        }
+
         const {
           data: { session },
           error: sessionError,
@@ -31,19 +72,19 @@ export default function AuthCallbackPage() {
           setMessage('Thank you for confirming your email. Redirecting you to the app...');
           window.setTimeout(() => {
             router.replace('/dashboard?confirmed=1');
-          }, 1400);
+          }, REDIRECT_DELAY_MS);
           return;
         }
 
         setMessage('Email confirmed. Please sign in to continue.');
         window.setTimeout(() => {
           router.replace('/?confirmed=1');
-        }, 1400);
+        }, REDIRECT_DELAY_MS);
       } catch (err: any) {
         if (!isMounted) {
           return;
         }
-        setError(err?.message || 'Could not complete email confirmation.');
+        setError(err?.message || 'Could not complete email confirmation. Please request a new confirmation email.');
       }
     };
 
