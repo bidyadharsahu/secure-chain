@@ -5,6 +5,9 @@ import { useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
+const RESEND_COOLDOWN_SECONDS = 30;
+const FORGOT_COOLDOWN_SECONDS = 30;
+
 export default function HomePage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -14,6 +17,8 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
   const [forgotLoading, setForgotLoading] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const [forgotCooldown, setForgotCooldown] = useState(0);
   const [signOutLoading, setSignOutLoading] = useState(false);
 
   const {
@@ -45,6 +50,21 @@ export default function HomePage() {
       setError('Reset link is invalid or expired. Please request a new password reset email.');
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    if (resendCooldown <= 0 && forgotCooldown <= 0) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setResendCooldown((seconds) => (seconds > 0 ? seconds - 1 : 0));
+      setForgotCooldown((seconds) => (seconds > 0 ? seconds - 1 : 0));
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [resendCooldown, forgotCooldown]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,6 +123,10 @@ export default function HomePage() {
     setError('');
     setSuccessMessage('');
 
+    if (resendCooldown > 0) {
+      return;
+    }
+
     const normalizedEmail = email.trim();
     if (!normalizedEmail) {
       setError('Please enter your email address first, then click resend confirmation.');
@@ -112,6 +136,7 @@ export default function HomePage() {
     try {
       setResendLoading(true);
       await resendConfirmation(normalizedEmail);
+      setResendCooldown(RESEND_COOLDOWN_SECONDS);
       setSuccessMessage('Confirmation email sent. Please check your inbox and spam folder.');
     } catch (err: any) {
       setError(err?.message || 'Failed to resend confirmation email.');
@@ -124,6 +149,10 @@ export default function HomePage() {
     setError('');
     setSuccessMessage('');
 
+    if (forgotCooldown > 0) {
+      return;
+    }
+
     const normalizedEmail = email.trim();
     if (!normalizedEmail) {
       setError('Please enter your email address first, then click forgot password.');
@@ -133,6 +162,7 @@ export default function HomePage() {
     try {
       setForgotLoading(true);
       await requestPasswordReset(normalizedEmail);
+      setForgotCooldown(FORGOT_COOLDOWN_SECONDS);
       setSuccessMessage('Password reset email sent. Check inbox/spam and open the link to set a new password.');
     } catch (err: any) {
       setError(err?.message || 'Failed to send password reset email.');
@@ -326,20 +356,28 @@ export default function HomePage() {
                 <button
                   type="button"
                   onClick={handleResendConfirmation}
-                  disabled={resendLoading}
+                  disabled={resendLoading || resendCooldown > 0}
                   className="text-sm text-[var(--ink-700)] hover:text-[var(--ink-900)] underline disabled:opacity-60"
                 >
-                  {resendLoading ? 'Sending confirmation email...' : 'Resend confirmation email'}
+                  {resendLoading
+                    ? 'Sending confirmation email...'
+                    : resendCooldown > 0
+                      ? `Resend confirmation in ${resendCooldown}s`
+                      : 'Resend confirmation email'}
                 </button>
 
                 {!isSignUp && (
                   <button
                     type="button"
                     onClick={handleForgotPassword}
-                    disabled={forgotLoading}
+                    disabled={forgotLoading || forgotCooldown > 0}
                     className="text-sm text-[var(--ink-700)] hover:text-[var(--ink-900)] underline disabled:opacity-60"
                   >
-                    {forgotLoading ? 'Sending reset email...' : 'Forgot password?'}
+                    {forgotLoading
+                      ? 'Sending reset email...'
+                      : forgotCooldown > 0
+                        ? `Forgot password in ${forgotCooldown}s`
+                        : 'Forgot password?'}
                   </button>
                 )}
               </div>
