@@ -137,6 +137,7 @@ export default function TransactionsPage() {
                   const payee = findPayeeByWallet(otherParty);
                   const avatarLabel = payee ? getPayeeInitials(payee.name) : formatAddress(otherParty, 1).replace('0x', '').slice(0, 2).toUpperCase();
                   const accent = payee ? payee.accent : 'from-slate-500 to-slate-600';
+                  const isDemoReceipt = tx.tx_hash.startsWith('demo-');
 
                   return (
                     <div
@@ -182,14 +183,20 @@ export default function TransactionsPage() {
                         {new Date(tx.created_at).toLocaleString()}
                       </p>
 
-                      <a
-                        href={getEtherscanUrl(tx.tx_hash)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-mono text-[var(--ink-700)] hover:underline"
-                      >
-                        Tx: {formatAddress(tx.tx_hash, 7)}
-                      </a>
+                      {isDemoReceipt ? (
+                        <span className="inline-flex text-xs font-semibold rounded-full px-2 py-1 bg-sky-100 text-sky-700">
+                          Local demo receipt: {tx.tx_hash}
+                        </span>
+                      ) : (
+                        <a
+                          href={getEtherscanUrl(tx.tx_hash)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs font-mono text-[var(--ink-700)] hover:underline"
+                        >
+                          Tx: {formatAddress(tx.tx_hash, 7)}
+                        </a>
+                      )}
                     </div>
                   );
                 })}

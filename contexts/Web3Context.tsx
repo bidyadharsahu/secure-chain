@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { isSepoliaNetwork, switchToSepolia } from '@/lib/web3';
 
@@ -16,18 +16,19 @@ export function Web3Provider({ children }: { children: React.ReactNode }) {
   const [isCorrectNetwork, setIsCorrectNetwork] = useState(false);
   const { walletAddress } = useAuth();
 
-  const checkNetwork = async (): Promise<boolean> => {
+  const checkNetwork = useCallback(async (): Promise<boolean> => {
     try {
       const isCorrect = await isSepoliaNetwork();
       setIsCorrectNetwork(isCorrect);
       return isCorrect;
     } catch (error) {
       console.error('Failed to check network:', error);
+      setIsCorrectNetwork(false);
       return false;
     }
-  };
+  }, []);
 
-  const switchNetwork = async () => {
+  const switchNetwork = useCallback(async () => {
     try {
       await switchToSepolia();
       await checkNetwork();
@@ -35,18 +36,26 @@ export function Web3Provider({ children }: { children: React.ReactNode }) {
       console.error('Failed to switch network:', error);
       throw error;
     }
-  };
+  }, [checkNetwork]);
 
   useEffect(() => {
-    if (walletAddress && window.ethereum) {
-      checkNetwork();
-
-      // Listen for network changes
-      window.ethereum.on('chainChanged', () => {
-        checkNetwork();
-      });
+    if (!walletAddress || !window.ethereum) {
+      setIsCorrectNetwork(false);
+      return;
     }
-  }, [walletAddress]);
+
+    const handleChainChanged = () => {
+      void checkNetwork();
+    };
+
+    void checkNetwork();
+
+    window.ethereum.on('chainChanged', handleChainChanged);
+
+    return () => {
+      window.ethereum?.removeListener?.('chainChanged', handleChainChanged);
+    };
+  }, [walletAddress, checkNetwork]);
 
   const value = {
     isCorrectNetwork,

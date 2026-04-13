@@ -14,12 +14,13 @@ import {
   approveSCPTokens,
   claimFromFaucet,
   getETHUSDPrice,
-  convertSCPToUSD,
   formatAddress,
   getEtherscanUrl,
+  hasLiveWeb3Config,
+  isDemoReceiptHash,
 } from '@/lib/web3';
 import {
-  getRecentTransactions,
+  getTransactionsByWallet,
   saveTransaction,
   updateTransactionStatus,
   logEvent,
@@ -77,9 +78,7 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const showHomeTab = activeTab !== 'scan' && activeTab !== 'profile';
-  const scpTokenConfigured = Boolean(process.env.NEXT_PUBLIC_SCP_TOKEN_ADDRESS);
-  const paymentContractConfigured = Boolean(process.env.NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS);
-  const walletFeaturesReady = scpTokenConfigured && paymentContractConfigured;
+  const demoMode = !hasLiveWeb3Config();
 
   const validRecentTransactions = useMemo(
     () =>
@@ -123,17 +122,30 @@ export default function DashboardPage() {
     if (!walletAddress) return;
 
     try {
-      const bal = await getSCPBalance(walletAddress);
-      setBalance(bal);
+      const [balanceResult, priceResult, transactionsResult] = await Promise.allSettled([
+        getSCPBalance(walletAddress),
+        getETHUSDPrice(),
+        getTransactionsByWallet(walletAddress, 5, 0),
+      ] as const);
 
-      const price = await getETHUSDPrice();
-      setEthUsdPrice(price);
+      const nextBalance = balanceResult.status === 'fulfilled' ? balanceResult.value : '0';
+      const nextPrice = priceResult.status === 'fulfilled' ? priceResult.value : '0';
+      const balanceNumber = Number(nextBalance);
+      const priceNumber = Number(nextPrice);
 
-      const usd = await convertSCPToUSD(bal);
-      setBalanceUSD(usd);
+      setBalance(nextBalance);
+      setEthUsdPrice(nextPrice);
+      setBalanceUSD(
+        Number.isFinite(balanceNumber) && Number.isFinite(priceNumber)
+          ? (balanceNumber * 0.001 * priceNumber).toFixed(2)
+          : '0.00'
+      );
 
-      const { transactions } = await getRecentTransactions(5);
-      setRecentTransactions(transactions || []);
+      if (transactionsResult.status === 'fulfilled') {
+        setRecentTransactions(transactionsResult.value.transactions || []);
+      } else {
+        setRecentTransactions([]);
+      }
     } catch (err) {
       console.error('Failed to load dashboard data:', err);
     }
@@ -289,11 +301,6 @@ export default function DashboardPage() {
     finalNote: string,
     mode: string
   ) => {
-    if (!paymentContractConfigured) {
-      setError('Payment contract address is not configured yet. Add NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS in Vercel.');
-      return;
-    }
-
     if (!isAddress(finalReceiver)) {
       setError('Receiver wallet address is invalid');
       return;
@@ -312,31 +319,44 @@ export default function DashboardPage() {
       const currentPrice = await getETHUSDPrice();
       const receipt = await sendPayment(finalReceiver, finalAmount, finalNote);
 
-      await saveTransaction({
-        tx_hash: receipt.hash,
-        sender_address: walletAddress!,
-        receiver_address: finalReceiver,
-        amount: finalAmount,
-        note: finalNote,
-        status: 'pending',
-        eth_usd_price: currentPrice,
-      });
+      try {
+        await saveTransaction({
+          tx_hash: receipt.hash,
+          sender_address: walletAddress!,
+          receiver_address: finalReceiver,
+          amount: finalAmount,
+          note: finalNote,
+          status: 'pending',
+          eth_usd_price: currentPrice,
+        });
 
-      await updateTransactionStatus(
-        receipt.hash,
-        'confirmed',
-        receipt.blockNumber,
-        Number(receipt.gasUsed),
-        receipt.gasPrice?.toString()
+        await updateTransactionStatus(
+          receipt.hash,
+          'confirmed',
+          receipt.blockNumber,
+          Number(receipt.gasUsed),
+          receipt.gasPrice?.toString()
+        );
+      } catch (persistError) {
+        console.warn('Unable to persist payment transaction:', persistError);
+      }
+
+      setSuccess(
+        demoMode
+          ? `Demo payment recorded locally. Tx: ${receipt.hash}`
+          : `Payment confirmed on-chain. Tx: ${receipt.hash}`
       );
 
-      setSuccess(`Payment confirmed on-chain. Tx: ${receipt.hash}`);
-      await logEvent('payment_sent', {
-        tx_hash: receipt.hash,
-        receiver: finalReceiver,
-        amount: finalAmount,
-        mode,
-      });
+      try {
+        await logEvent('payment_sent', {
+          tx_hash: receipt.hash,
+          receiver: finalReceiver,
+          amount: finalAmount,
+          mode,
+        });
+      } catch (logError) {
+        console.warn('Unable to log payment event:', logError);
+      }
 
       resetForms();
       await loadDashboardData();
@@ -355,7 +375,7 @@ export default function DashboardPage() {
     try {
       if (trimmed.startsWith('{')) {
         const parsed = JSON.parse(trimmed);
-        if (parsed?.address) {
+        if (parsed?.address && isAddress(parsed.address)) {
           return {
             address: parsed.address,
             amount: parsed.amount,
@@ -371,7 +391,7 @@ export default function DashboardPage() {
       const query = trimmed.replace('scp://pay?', '');
       const params = new URLSearchParams(query);
       const address = params.get('address');
-      if (!address) return null;
+      if (!address || !isAddress(address)) return null;
       return {
         address,
         amount: params.get('amount') || undefined,
@@ -393,7 +413,7 @@ export default function DashboardPage() {
     }
 
     if (trimmed.startsWith('0x')) {
-      return { address: trimmed };
+      return isAddress(trimmed) ? { address: trimmed } : null;
     }
 
     return null;
@@ -422,19 +442,24 @@ export default function DashboardPage() {
   };
 
   const handleClaimFaucet = async () => {
-    if (!scpTokenConfigured) {
-      setError('SCP token address is not configured yet. Add NEXT_PUBLIC_SCP_TOKEN_ADDRESS in Vercel.');
-      return;
-    }
-
     try {
       setClaiming(true);
       setError('');
       setSuccess('');
 
       const receipt = await claimFromFaucet();
-      setSuccess(`Successfully claimed 100 SCP. Tx: ${receipt.hash}`);
-      await logEvent('faucet_claimed', { tx_hash: receipt.hash });
+      setSuccess(
+        demoMode
+          ? `Demo faucet credited with 100 SCP. Tx: ${receipt.hash}`
+          : `Successfully claimed 100 SCP. Tx: ${receipt.hash}`
+      );
+
+      try {
+        await logEvent('faucet_claimed', { tx_hash: receipt.hash });
+      } catch (logError) {
+        console.warn('Unable to log faucet claim event:', logError);
+      }
+
       await loadDashboardData();
     } catch (err: any) {
       setError(err.message || 'Failed to claim from faucet');
@@ -444,18 +469,22 @@ export default function DashboardPage() {
   };
 
   const handleApprove = async () => {
-    if (!walletFeaturesReady) {
-      setError('SCP token and payment contract addresses must be configured before approval.');
-      return;
-    }
-
     try {
       setApproving(true);
       setError('');
       setSuccess('');
       await approveSCPTokens('1000000');
-      setSuccess('Successfully approved SCP tokens for transfers');
-      await logEvent('tokens_approved');
+      setSuccess(
+        demoMode
+          ? 'Demo approval saved locally. Live approvals will work after contract setup.'
+          : 'Successfully approved SCP tokens for transfers'
+      );
+
+      try {
+        await logEvent('tokens_approved');
+      } catch (logError) {
+        console.warn('Unable to log approval event:', logError);
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to approve tokens');
     } finally {
@@ -559,14 +588,21 @@ export default function DashboardPage() {
 
           <div className="mt-4 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-white/90">
-              <span className={`pulse-dot ${isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
-              <span>{isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
+              <span className={`pulse-dot ${demoMode ? 'bg-sky-300' : isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
+              <span>{demoMode ? 'Demo mode active' : isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
             </div>
             <span className="text-white/75">Block #{chainBlock}</span>
           </div>
         </header>
 
-        {!isCorrectNetwork && (
+        {demoMode ? (
+          <div className="mx-4 mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+            <p className="font-semibold">Demo mode active</p>
+            <p className="mt-1">
+              Free SCP works locally while the contract addresses are missing. Add NEXT_PUBLIC_SCP_TOKEN_ADDRESS and NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS in Vercel to switch back to live on-chain mode.
+            </p>
+          </div>
+        ) : !isCorrectNetwork && (
           <div className="mx-4 mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-center justify-between gap-3">
             <span>Switch to Sepolia to make payments.</span>
             <button onClick={switchNetwork} className="bg-amber-600 text-white text-xs px-3 py-2 rounded-xl">
@@ -578,24 +614,17 @@ export default function DashboardPage() {
         <main className="px-4 pb-24 pt-4">
           {showHomeTab && (
             <div className="animate-screen-enter">
-              {!walletFeaturesReady && (
-                <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                  <p className="font-semibold">Setup required for full on-chain mode</p>
-                  <p className="mt-1">Missing: {!scpTokenConfigured ? 'NEXT_PUBLIC_SCP_TOKEN_ADDRESS ' : ''}{!paymentContractConfigured ? 'NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS' : ''}</p>
-                </div>
-              )}
-
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <button
                   onClick={handleClaimFaucet}
-                  disabled={claiming || !isCorrectNetwork || !scpTokenConfigured}
+                  disabled={claiming || (!demoMode && !isCorrectNetwork)}
                   className="action-button rounded-2xl bg-[var(--mint-500)] text-white p-3 text-sm font-semibold disabled:opacity-50"
                 >
                   {claiming ? 'Claiming...' : 'Claim Faucet'}
                 </button>
                 <button
                   onClick={handleApprove}
-                  disabled={approving || !isCorrectNetwork || !walletFeaturesReady}
+                  disabled={approving || (!demoMode && !isCorrectNetwork)}
                   className="action-button rounded-2xl bg-[var(--ink-700)] text-white p-3 text-sm font-semibold disabled:opacity-50"
                 >
                   {approving ? 'Approving...' : 'Approve SCP'}
@@ -658,7 +687,7 @@ export default function DashboardPage() {
                   />
                   <button
                     type="submit"
-                    disabled={sending || !isCorrectNetwork || !walletFeaturesReady}
+                    disabled={sending || (!demoMode && !isCorrectNetwork)}
                     className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay Now'}
@@ -732,7 +761,7 @@ export default function DashboardPage() {
                   <p className="text-xs text-[var(--text-soft)]">Popular: {UPI_DIRECTORY.map((d) => d.upiId).slice(0, 3).join(', ')}</p>
                   <button
                     type="submit"
-                    disabled={sending || !isCorrectNetwork || !walletFeaturesReady}
+                    disabled={sending || (!demoMode && !isCorrectNetwork)}
                     className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay by UPI ID'}
@@ -794,9 +823,15 @@ export default function DashboardPage() {
                             </span>
                           </div>
                         </div>
-                        <a href={getEtherscanUrl(tx.tx_hash)} target="_blank" rel="noopener noreferrer" className="text-xs mt-2 inline-block text-[var(--ink-700)] hover:underline">
-                          Explorer: {formatAddress(tx.tx_hash, 5)}
-                        </a>
+                        {isDemoReceiptHash(tx.tx_hash) ? (
+                          <span className="text-xs mt-2 inline-flex rounded-full bg-sky-100 text-sky-700 px-2 py-1">
+                            Local demo receipt
+                          </span>
+                        ) : (
+                          <a href={getEtherscanUrl(tx.tx_hash)} target="_blank" rel="noopener noreferrer" className="text-xs mt-2 inline-block text-[var(--ink-700)] hover:underline">
+                            Explorer: {formatAddress(tx.tx_hash, 5)}
+                          </a>
+                        )}
                       </div>
                     );
                     })
@@ -868,7 +903,7 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     onClick={() => executePayment(scanResult.address, scanResult.amount || amount, scanResult.note || note || 'QR Payment', 'qr')}
-                    disabled={sending || !isCorrectNetwork || !walletFeaturesReady}
+                    disabled={sending || (!demoMode && !isCorrectNetwork)}
                     className="mt-2 w-full bg-[var(--ink-900)] text-white py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay Scanned QR'}
