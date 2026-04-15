@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { EmailOtpType } from '@supabase/supabase-js';
 import { isSupabaseConfigured, supabase, supabaseConfigMessage } from '@/lib/supabase/client';
@@ -22,8 +22,14 @@ export default function AuthCallbackPage() {
   const router = useRouter();
   const [message, setMessage] = useState('Confirming your email...');
   const [error, setError] = useState('');
+  const hasFinalizedRef = useRef(false);
 
   useEffect(() => {
+    if (hasFinalizedRef.current) {
+      return;
+    }
+
+    hasFinalizedRef.current = true;
     let isMounted = true;
 
     const finalizeAuth = async () => {
@@ -51,10 +57,20 @@ export default function AuthCallbackPage() {
             token_hash: tokenHash,
             type: tokenType,
           });
+
           if (verifyError) {
-            throw verifyError;
+            const {
+              data: { session: existingSession },
+            } = await supabase.auth.getSession();
+
+            if (!existingSession?.user) {
+              throw verifyError;
+            }
           }
         }
+
+        const cleanUrl = `${window.location.origin}/auth/callback`;
+        window.history.replaceState({}, '', cleanUrl);
 
         const {
           data: { session },

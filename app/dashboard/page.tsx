@@ -66,6 +66,9 @@ export default function DashboardPage() {
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
   const [upiId, setUpiId] = useState('');
+  const [collectAmount, setCollectAmount] = useState('');
+  const [collectNote, setCollectNote] = useState('SecureChain transfer');
+  const [collectFormat, setCollectFormat] = useState<'scp' | 'upi'>('scp');
 
   const [cameraEnabled, setCameraEnabled] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -78,7 +81,8 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const showHomeTab = activeTab !== 'scan' && activeTab !== 'profile';
-  const demoMode = !hasLiveWeb3Config();
+  const limitedMode = !hasLiveWeb3Config();
+  const canTransact = limitedMode || isCorrectNetwork;
 
   const validRecentTransactions = useMemo(
     () =>
@@ -159,8 +163,15 @@ export default function DashboardPage() {
     }
 
     setScanResult(parsed);
-    setAmount((previousAmount) => parsed.amount || previousAmount);
-    setNote((previousNote) => parsed.note || previousNote);
+
+    if (parsed.amount && Number(parsed.amount) > 0) {
+      setAmount(parsed.amount);
+    }
+
+    if (parsed.note) {
+      setNote(parsed.note);
+    }
+
     setSuccess('QR scanned successfully. Review and pay.');
     setScanError('');
     setCameraEnabled(false);
@@ -342,8 +353,8 @@ export default function DashboardPage() {
       }
 
       setSuccess(
-        demoMode
-          ? `Demo payment recorded locally. Tx: ${receipt.hash}`
+        limitedMode
+          ? `Payment saved locally. Tx: ${receipt.hash}`
           : `Payment confirmed on-chain. Tx: ${receipt.hash}`
       );
 
@@ -394,7 +405,7 @@ export default function DashboardPage() {
       if (!address || !isAddress(address)) return null;
       return {
         address,
-        amount: params.get('amount') || undefined,
+        amount: params.get('amount') || params.get('am') || undefined,
         note: params.get('note') || undefined,
       };
     }
@@ -402,11 +413,18 @@ export default function DashboardPage() {
     if (trimmed.startsWith('upi://pay?')) {
       const query = trimmed.replace('upi://pay?', '');
       const params = new URLSearchParams(query);
-      const upi = params.get('pa') || '';
-      const payee = resolveUpiPayee(upi);
-      if (!payee) return null;
+      const payeeAddress = params.get('pa') || '';
+      const payee = resolveUpiPayee(payeeAddress);
+
+      let address = payee?.walletAddress;
+      if (!address && isAddress(payeeAddress)) {
+        address = payeeAddress;
+      }
+
+      if (!address) return null;
+
       return {
-        address: payee.walletAddress,
+        address,
         amount: params.get('am') || undefined,
         note: params.get('tn') || params.get('pn') || undefined,
       };
@@ -449,8 +467,8 @@ export default function DashboardPage() {
 
       const receipt = await claimFromFaucet();
       setSuccess(
-        demoMode
-          ? `Demo faucet credited with 100 SCP. Tx: ${receipt.hash}`
+        limitedMode
+          ? `Faucet credited with 100 SCP. Tx: ${receipt.hash}`
           : `Successfully claimed 100 SCP. Tx: ${receipt.hash}`
       );
 
@@ -475,8 +493,8 @@ export default function DashboardPage() {
       setSuccess('');
       await approveSCPTokens('1000000');
       setSuccess(
-        demoMode
-          ? 'Demo approval saved locally. Live approvals will work after contract setup.'
+        limitedMode
+          ? 'Approval saved locally. Complete contract setup to enable live approvals.'
           : 'Successfully approved SCP tokens for transfers'
       );
 
@@ -552,7 +570,34 @@ export default function DashboardPage() {
     );
   }
 
-  const collectPayload = `scp://pay?address=${walletAddress}&note=${encodeURIComponent('SecureChain transfer')}`;
+  const collectPayload = useMemo(() => {
+    const params = new URLSearchParams({
+      address: walletAddress,
+      note: collectNote.trim() || 'SecureChain transfer',
+    });
+
+    if (collectAmount && Number(collectAmount) > 0) {
+      params.set('amount', collectAmount);
+    }
+
+    return `scp://pay?${params.toString()}`;
+  }, [walletAddress, collectAmount, collectNote]);
+
+  const collectUpiPayload = useMemo(() => {
+    const params = new URLSearchParams({
+      pa: walletAddress,
+      pn: 'SecureChain Wallet',
+      tn: collectNote.trim() || 'SecureChain transfer',
+    });
+
+    if (collectAmount && Number(collectAmount) > 0) {
+      params.set('am', collectAmount);
+    }
+
+    return `upi://pay?${params.toString()}`;
+  }, [walletAddress, collectAmount, collectNote]);
+
+  const activeCollectPayload = collectFormat === 'upi' ? collectUpiPayload : collectPayload;
 
   return (
     <div className="min-h-screen px-3 py-4 md:py-8">
@@ -588,21 +633,14 @@ export default function DashboardPage() {
 
           <div className="mt-4 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-white/90">
-              <span className={`pulse-dot ${demoMode ? 'bg-sky-300' : isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
-              <span>{demoMode ? 'Demo mode active' : isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
+              <span className={`pulse-dot ${limitedMode ? 'bg-sky-300' : isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
+              <span>{limitedMode ? 'Local fallback mode' : isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
             </div>
             <span className="text-white/75">Block #{chainBlock}</span>
           </div>
         </header>
 
-        {demoMode ? (
-          <div className="mx-4 mt-4 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
-            <p className="font-semibold">Demo mode active</p>
-            <p className="mt-1">
-              Free SCP works locally while the contract addresses are missing. Add NEXT_PUBLIC_SCP_TOKEN_ADDRESS and NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS in Vercel to switch back to live on-chain mode.
-            </p>
-          </div>
-        ) : !isCorrectNetwork && (
+        {!limitedMode && !isCorrectNetwork && (
           <div className="mx-4 mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-center justify-between gap-3">
             <span>Switch to Sepolia to make payments.</span>
             <button onClick={switchNetwork} className="bg-amber-600 text-white text-xs px-3 py-2 rounded-xl">
@@ -617,14 +655,14 @@ export default function DashboardPage() {
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <button
                   onClick={handleClaimFaucet}
-                  disabled={claiming || (!demoMode && !isCorrectNetwork)}
+                  disabled={claiming || !canTransact}
                   className="action-button rounded-2xl bg-[var(--mint-500)] text-white p-3 text-sm font-semibold disabled:opacity-50"
                 >
                   {claiming ? 'Claiming...' : 'Claim Faucet'}
                 </button>
                 <button
                   onClick={handleApprove}
-                  disabled={approving || (!demoMode && !isCorrectNetwork)}
+                  disabled={approving || !canTransact}
                   className="action-button rounded-2xl bg-[var(--ink-700)] text-white p-3 text-sm font-semibold disabled:opacity-50"
                 >
                   {approving ? 'Approving...' : 'Approve SCP'}
@@ -632,7 +670,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="soft-card p-4 mb-4 text-xs text-[var(--text-soft)]">
-                <p><strong>Claim Faucet:</strong> mints free demo SCP tokens to your wallet for testing.</p>
+                <p><strong>Claim Faucet:</strong> mints free SCP tokens to your wallet for quick testing.</p>
                 <p className="mt-1"><strong>Approve SCP:</strong> allows the payment contract to spend SCP on your behalf while sending payments.</p>
               </div>
 
@@ -687,7 +725,7 @@ export default function DashboardPage() {
                   />
                   <button
                     type="submit"
-                    disabled={sending || (!demoMode && !isCorrectNetwork)}
+                    disabled={sending || !canTransact}
                     className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay Now'}
@@ -761,7 +799,7 @@ export default function DashboardPage() {
                   <p className="text-xs text-[var(--text-soft)]">Popular: {UPI_DIRECTORY.map((d) => d.upiId).slice(0, 3).join(', ')}</p>
                   <button
                     type="submit"
-                    disabled={sending || (!demoMode && !isCorrectNetwork)}
+                    disabled={sending || !canTransact}
                     className="w-full bg-[var(--ink-900)] text-white py-3 rounded-xl font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay by UPI ID'}
@@ -772,10 +810,51 @@ export default function DashboardPage() {
               {homeMode === 'collect' && (
                 <div className="soft-card p-4 mb-4">
                   <h3 className="font-bold text-[var(--ink-900)] mb-2">Your Receive QR</h3>
-                  <p className="text-xs text-[var(--text-soft)] mb-3">Share this QR to receive SCP payments.</p>
+                  <p className="text-xs text-[var(--text-soft)] mb-3">Share this QR to receive SCP payments with optional amount and note.</p>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs mb-3">
+                    <button
+                      type="button"
+                      onClick={() => setCollectFormat('scp')}
+                      className={`rounded-xl px-3 py-2 font-semibold ${
+                        collectFormat === 'scp' ? 'bg-[var(--ink-900)] text-white' : 'bg-[var(--cloud-100)] text-[var(--ink-700)]'
+                      }`}
+                    >
+                      SecureChain QR
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCollectFormat('upi')}
+                      className={`rounded-xl px-3 py-2 font-semibold ${
+                        collectFormat === 'upi' ? 'bg-[var(--ink-900)] text-white' : 'bg-[var(--cloud-100)] text-[var(--ink-700)]'
+                      }`}
+                    >
+                      UPI QR
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 mb-3">
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={collectAmount}
+                      onChange={(e) => setCollectAmount(e.target.value)}
+                      placeholder="Optional amount in SCP"
+                      className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                    />
+                    <input
+                      type="text"
+                      value={collectNote}
+                      onChange={(e) => setCollectNote(e.target.value)}
+                      placeholder="Note for payer"
+                      className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                    />
+                  </div>
+
                   <div className="bg-white rounded-2xl p-4 border border-[var(--cloud-200)] w-fit mx-auto">
                     <Image
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(collectPayload)}`}
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(activeCollectPayload)}`}
                       alt="Receive QR"
                       width={220}
                       height={220}
@@ -783,7 +862,7 @@ export default function DashboardPage() {
                       className="w-[220px] h-[220px] rounded-xl"
                     />
                   </div>
-                  <p className="mt-3 text-xs font-mono break-all text-[var(--text-soft)]">{collectPayload}</p>
+                  <p className="mt-3 text-xs font-mono break-all text-[var(--text-soft)]">{activeCollectPayload}</p>
                 </div>
               )}
 
@@ -825,7 +904,7 @@ export default function DashboardPage() {
                         </div>
                         {isDemoReceiptHash(tx.tx_hash) ? (
                           <span className="text-xs mt-2 inline-flex rounded-full bg-sky-100 text-sky-700 px-2 py-1">
-                            Local demo receipt
+                            Local receipt
                           </span>
                         ) : (
                           <a href={getEtherscanUrl(tx.tx_hash)} target="_blank" rel="noopener noreferrer" className="text-xs mt-2 inline-block text-[var(--ink-700)] hover:underline">
@@ -898,12 +977,28 @@ export default function DashboardPage() {
               {scanResult && (
                 <div className="rounded-xl border border-[var(--cloud-200)] bg-[var(--cloud-100)] p-3 text-xs space-y-1 mt-3">
                   <p><strong>Receiver:</strong> {formatAddress(scanResult.address, 6)}</p>
-                  <p><strong>Amount:</strong> {scanResult.amount || amount || 'Not set'}</p>
-                  <p><strong>Note:</strong> {scanResult.note || note || 'None'}</p>
+                  <p><strong>Detected amount:</strong> {scanResult.amount || 'Not provided in QR'}</p>
+                  <p><strong>Detected note:</strong> {scanResult.note || 'None'}</p>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="Enter payment amount in SCP"
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
+                  <input
+                    type="text"
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="Add note (optional)"
+                    className="w-full border border-[var(--cloud-200)] rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-[var(--aqua-400)]"
+                  />
                   <button
                     type="button"
-                    onClick={() => executePayment(scanResult.address, scanResult.amount || amount, scanResult.note || note || 'QR Payment', 'qr')}
-                    disabled={sending || (!demoMode && !isCorrectNetwork)}
+                    onClick={() => executePayment(scanResult.address, amount, note || scanResult.note || 'QR Payment', 'qr')}
+                    disabled={sending || !canTransact}
                     className="mt-2 w-full bg-[var(--ink-900)] text-white py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
                   >
                     {sending ? 'Processing on chain...' : 'Pay Scanned QR'}

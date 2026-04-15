@@ -10,6 +10,7 @@ export default function ResetPasswordPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
+  const [canReset, setCanReset] = useState(false);
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
@@ -26,7 +27,10 @@ export default function ResetPasswordPage() {
       }
 
       if (!session?.user) {
+        setCanReset(false);
         setError('Reset link is invalid or expired. Please request a new reset email.');
+      } else {
+        setCanReset(true);
       }
 
       setCheckingSession(false);
@@ -43,6 +47,11 @@ export default function ResetPasswordPage() {
     event.preventDefault();
     setError('');
     setSuccessMessage('');
+
+    if (!canReset) {
+      setError('Reset session is not valid. Please request a new reset email.');
+      return;
+    }
 
     if (password.length < 8) {
       setError('Password must be at least 8 characters long.');
@@ -132,7 +141,7 @@ export default function ResetPasswordPage() {
 
           <button
             type="submit"
-            disabled={checkingSession || loading || Boolean(successMessage)}
+            disabled={checkingSession || loading || Boolean(successMessage) || !canReset}
             className="w-full bg-[var(--ink-900)] text-white py-3 px-4 rounded-xl font-semibold hover:bg-[var(--ink-700)] transition disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {checkingSession ? 'Verifying reset link...' : loading ? 'Updating password...' : 'Update Password'}

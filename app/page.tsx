@@ -6,7 +6,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
 const RESEND_COOLDOWN_SECONDS = 30;
-const FORGOT_COOLDOWN_SECONDS = 30;
+const FORGOT_COOLDOWN_SECONDS = 60;
+const FORGOT_REQUEST_STORAGE_KEY = 'secure-chain:forgot-password-last-request';
 
 export default function HomePage() {
   const [email, setEmail] = useState('');
@@ -65,6 +66,24 @@ export default function HomePage() {
       window.clearInterval(intervalId);
     };
   }, [resendCooldown, forgotCooldown]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const lastRequestedAt = Number(window.localStorage.getItem(FORGOT_REQUEST_STORAGE_KEY) || 0);
+    if (!lastRequestedAt) {
+      return;
+    }
+
+    const elapsedSeconds = Math.floor((Date.now() - lastRequestedAt) / 1000);
+    const remainingSeconds = FORGOT_COOLDOWN_SECONDS - elapsedSeconds;
+
+    if (remainingSeconds > 0) {
+      setForgotCooldown(remainingSeconds);
+    }
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -153,6 +172,17 @@ export default function HomePage() {
       return;
     }
 
+    if (typeof window !== 'undefined') {
+      const lastRequestedAt = Number(window.localStorage.getItem(FORGOT_REQUEST_STORAGE_KEY) || 0);
+      if (lastRequestedAt) {
+        const elapsedSeconds = Math.floor((Date.now() - lastRequestedAt) / 1000);
+        if (elapsedSeconds < FORGOT_COOLDOWN_SECONDS) {
+          setForgotCooldown(FORGOT_COOLDOWN_SECONDS - elapsedSeconds);
+          return;
+        }
+      }
+    }
+
     const normalizedEmail = email.trim();
     if (!normalizedEmail) {
       setError('Please enter your email address first, then click forgot password.');
@@ -163,6 +193,9 @@ export default function HomePage() {
       setForgotLoading(true);
       await requestPasswordReset(normalizedEmail);
       setForgotCooldown(FORGOT_COOLDOWN_SECONDS);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(FORGOT_REQUEST_STORAGE_KEY, String(Date.now()));
+      }
       setSuccessMessage('Password reset email sent. Check inbox/spam and open the link to set a new password.');
     } catch (err: any) {
       setError(err?.message || 'Failed to send password reset email.');

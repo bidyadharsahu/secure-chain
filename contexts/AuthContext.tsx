@@ -52,6 +52,20 @@ const getAuthErrorMessage = (error: { message?: string } | null) => {
   }
 
   if (
+    normalized.includes('otp') &&
+    (normalized.includes('attempt') ||
+      normalized.includes('too many') ||
+      normalized.includes('expired') ||
+      normalized.includes('already used'))
+  ) {
+    return 'Too many OTP attempts or an expired reset token was detected. Request a fresh password reset email and use only the latest link.';
+  }
+
+  if (normalized.includes('request this after') || normalized.includes('security purposes')) {
+    return 'Please wait a minute before requesting another password reset email.';
+  }
+
+  if (
     normalized.includes('already registered') ||
     normalized.includes('already been registered') ||
     normalized.includes('already exists') ||

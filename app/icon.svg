@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="SecureChainPay icon">
+  <defs>
+    <linearGradient id="shieldGradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="100%" stop-color="#0ea5e9" />
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="#e2e8f0" />
+  <path d="M64 16L104 34V62C104 88 85 108 64 114C43 108 24 88 24 62V34L64 16Z" fill="url(#shieldGradient)" />
+  <path d="M44 50C44 42 50 36 58 36H70C78 36 84 42 84 50V52H72V50C72 48 70 46 68 46H60C58 46 56 48 56 50V54C56 56 58 58 60 58H70C78 58 84 64 84 72V78C84 86 78 92 70 92H58C50 92 44 86 44 78V76H56V78C56 80 58 82 60 82H68C70 82 72 80 72 78V74C72 72 70 70 68 70H58C50 70 44 64 44 56V50Z" fill="#f8fafc" />
+</svg>
