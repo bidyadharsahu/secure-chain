@@ -96,6 +96,15 @@ const setDemoApproval = (address: string, amount: string) => {
   writeStoredValue(getDemoApprovalKey(address), amount);
 };
 
+const getConfiguredPaymentAddress = () => {
+  const paymentAddress = normalizeEnvValue(process.env.NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS);
+  if (!isConfiguredAddress(paymentAddress)) {
+    throw new Error('Payment contract address not configured');
+  }
+
+  return paymentAddress!;
+};
+
 export function hasSCPTokenConfig() {
   return isConfiguredAddress(process.env.NEXT_PUBLIC_SCP_TOKEN_ADDRESS);
 }
@@ -248,14 +257,10 @@ export async function approveSCPTokens(amount: string): Promise<any> {
 
   const signer = await getSigner();
   const contract = getSCPTokenContract(signer);
-  const paymentAddress = normalizeEnvValue(process.env.NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS);
-
-  if (!isConfiguredAddress(paymentAddress)) {
-    throw new Error('Payment contract address not configured');
-  }
+  const paymentAddress = getConfiguredPaymentAddress();
   
   const amountWei = parseUnits(amount, 18);
-  const tx = await contract.approve(paymentAddress!, amountWei);
+  const tx = await contract.approve(paymentAddress, amountWei);
   return await tx.wait();
 }
 
@@ -303,13 +308,23 @@ export async function sendPayment(
     }
 
     setDemoBalance(senderAddress, (currentBalance - amountValue).toFixed(6));
+    addDemoBalance(receiver, amount);
     return createDemoReceipt('payment');
   }
 
   const signer = await getSigner();
-  const contract = getPaymentContract(signer);
-  
+  const signerAddress = await signer.getAddress();
+  const paymentAddress = getConfiguredPaymentAddress();
+  const tokenContract = getSCPTokenContract(signer);
   const amountWei = parseUnits(amount, 18);
+
+  const allowance = await tokenContract.allowance(signerAddress, paymentAddress);
+  if (allowance < amountWei) {
+    const approvalTx = await tokenContract.approve(paymentAddress, amountWei);
+    await approvalTx.wait();
+  }
+
+  const contract = getPaymentContract(signer);
   const tx = await contract.sendPayment(receiver, amountWei, note);
   return await tx.wait();
 }

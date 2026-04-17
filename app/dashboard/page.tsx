@@ -74,6 +74,7 @@ export default function DashboardPage() {
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanError, setScanError] = useState('');
   const [manualPayload, setManualPayload] = useState('');
+  const [uploadingQr, setUploadingQr] = useState(false);
 
   const [sending, setSending] = useState(false);
   const [claiming, setClaiming] = useState(false);
@@ -99,6 +100,79 @@ export default function DashboardPage() {
 
   const upiSuggestions = useMemo(() => searchUpiPayees(upiId), [upiId]);
   const resolvedUpiPayee = useMemo(() => resolveUpiPayee(upiId), [upiId]);
+
+  const collectPayload = useMemo(() => {
+    if (!walletAddress) return '';
+
+    const params = new URLSearchParams({
+      address: walletAddress,
+      note: collectNote.trim() || 'SecureChain transfer',
+    });
+
+    if (collectAmount && Number(collectAmount) > 0) {
+      params.set('amount', collectAmount);
+    }
+
+    return `scp://pay?${params.toString()}`;
+  }, [walletAddress, collectAmount, collectNote]);
+
+  const collectUpiPayload = useMemo(() => {
+    if (!walletAddress) return '';
+
+    const params = new URLSearchParams({
+      pa: walletAddress,
+      pn: 'SecureChain Wallet',
+      tn: collectNote.trim() || 'SecureChain transfer',
+    });
+
+    if (collectAmount && Number(collectAmount) > 0) {
+      params.set('am', collectAmount);
+    }
+
+    return `upi://pay?${params.toString()}`;
+  }, [walletAddress, collectAmount, collectNote]);
+
+  const activeCollectPayload = collectFormat === 'upi' ? collectUpiPayload : collectPayload;
+
+  const normalizeScanAmount = (value: string | null | undefined): string | undefined => {
+    if (!value) return undefined;
+    const numericValue = Number(value.trim());
+    if (!Number.isFinite(numericValue) || numericValue <= 0) {
+      return undefined;
+    }
+
+    return numericValue.toString();
+  };
+
+  const toUserFacingError = (err: unknown): string => {
+    const fallbackMessage = 'Payment failed. Please try again.';
+    const maybeError = err as { message?: string; shortMessage?: string; reason?: string };
+    const message =
+      maybeError?.shortMessage || maybeError?.reason || maybeError?.message || fallbackMessage;
+    const normalized = message.toLowerCase();
+
+    if (normalized.includes('user rejected') || normalized.includes('user denied')) {
+      return 'Payment cancelled in MetaMask.';
+    }
+
+    if (normalized.includes('insufficient balance')) {
+      return 'Insufficient SCP balance. Claim faucet or lower the amount.';
+    }
+
+    if (normalized.includes('insufficient allowance')) {
+      return 'Token approval failed. Re-open payment and approve in MetaMask.';
+    }
+
+    if (normalized.includes('metamask is not installed')) {
+      return 'MetaMask is required to complete this payment.';
+    }
+
+    if (normalized.includes('wrong network') || normalized.includes('chain')) {
+      return 'Switch MetaMask to Sepolia network and try again.';
+    }
+
+    return message;
+  };
 
   const loadChainPulse = useCallback(async () => {
     try {
@@ -158,11 +232,12 @@ export default function DashboardPage() {
   const handleQrDetected = useCallback((rawValue: string) => {
     const parsed = parseQrPayload(rawValue);
     if (!parsed) {
-      setScanError('Unsupported QR payload. Try a SecureChain QR.');
+      setScanError('Unsupported QR payload. Try a SecureChain/UPI QR or upload a clearer image.');
       return;
     }
 
     setScanResult(parsed);
+    setReceiver(parsed.address);
 
     if (parsed.amount && Number(parsed.amount) > 0) {
       setAmount(parsed.amount);
@@ -172,7 +247,8 @@ export default function DashboardPage() {
       setNote(parsed.note);
     }
 
-    setSuccess('QR scanned successfully. Review and pay.');
+    setSuccess('QR scanned successfully. Review details and pay.');
+    setError('');
     setScanError('');
     setCameraEnabled(false);
   }, []);
@@ -197,7 +273,7 @@ export default function DashboardPage() {
     if (!videoRef.current) return;
 
     if (!('BarcodeDetector' in window)) {
-      setScanError('Live camera scanning is not supported in this browser. Use manual payload parsing.');
+      setScanError('Live camera scanning is not supported in this browser. Upload QR image or paste payload below.');
       return;
     }
 
@@ -243,7 +319,7 @@ export default function DashboardPage() {
         void scanLoop();
       });
     } catch {
-      setScanError('Unable to access camera. Please allow camera permission.');
+      setScanError('Unable to access camera. Allow camera permission or use QR image upload.');
     }
   }, [handleQrDetected]);
 
@@ -325,7 +401,11 @@ export default function DashboardPage() {
     try {
       setSending(true);
       setError('');
-      setSuccess('');
+      setSuccess(
+        limitedMode
+          ? 'Processing local payment...'
+          : 'Opening MetaMask. Approve token access (if prompted), then approve payment.'
+      );
 
       const currentPrice = await getETHUSDPrice();
       const receipt = await sendPayment(finalReceiver, finalAmount, finalNote);
@@ -373,7 +453,8 @@ export default function DashboardPage() {
       await loadDashboardData();
       await loadChainPulse();
     } catch (err: any) {
-      setError(err.message || 'Payment failed');
+      setError(toUserFacingError(err));
+      setSuccess('');
     } finally {
       setSending(false);
     }
@@ -383,15 +464,49 @@ export default function DashboardPage() {
     const trimmed = payload.trim();
     if (!trimmed) return null;
 
+    const parseScpDeepLink = (query: string): ScanResult | null => {
+      const params = new URLSearchParams(query);
+      const address = params.get('address') || params.get('to') || params.get('receiver');
+      if (!address || !isAddress(address)) return null;
+      return {
+        address,
+        amount: normalizeScanAmount(params.get('amount') || params.get('am')),
+        note: params.get('note') || params.get('tn') || params.get('pn') || undefined,
+      };
+    };
+
+    const parseUpiDeepLink = (query: string): ScanResult | null => {
+      const params = new URLSearchParams(query);
+      const payeeRef = (params.get('pa') || params.get('address') || '').trim();
+      const payee = resolveUpiPayee(payeeRef);
+
+      let address = payee?.walletAddress;
+      if (!address && isAddress(payeeRef)) {
+        address = payeeRef;
+      }
+
+      if (!address) return null;
+
+      return {
+        address,
+        amount: normalizeScanAmount(params.get('am') || params.get('amount')),
+        note: params.get('tn') || params.get('note') || params.get('pn') || undefined,
+      };
+    };
+
     try {
       if (trimmed.startsWith('{')) {
         const parsed = JSON.parse(trimmed);
         if (parsed?.address && isAddress(parsed.address)) {
           return {
             address: parsed.address,
-            amount: parsed.amount,
-            note: parsed.note,
+            amount: normalizeScanAmount(parsed.amount),
+            note: parsed.note || parsed.tn || undefined,
           };
+        }
+
+        if (typeof parsed?.payload === 'string') {
+          return parseQrPayload(parsed.payload);
         }
       }
     } catch {
@@ -399,34 +514,62 @@ export default function DashboardPage() {
     }
 
     if (trimmed.startsWith('scp://pay?')) {
-      const query = trimmed.replace('scp://pay?', '');
-      const params = new URLSearchParams(query);
-      const address = params.get('address');
-      if (!address || !isAddress(address)) return null;
-      return {
-        address,
-        amount: params.get('amount') || params.get('am') || undefined,
-        note: params.get('note') || undefined,
-      };
+      const query = trimmed.slice('scp://pay?'.length);
+      return parseScpDeepLink(query);
     }
 
     if (trimmed.startsWith('upi://pay?')) {
-      const query = trimmed.replace('upi://pay?', '');
-      const params = new URLSearchParams(query);
-      const payeeAddress = params.get('pa') || '';
-      const payee = resolveUpiPayee(payeeAddress);
+      const query = trimmed.slice('upi://pay?'.length);
+      return parseUpiDeepLink(query);
+    }
 
-      let address = payee?.walletAddress;
-      if (!address && isAddress(payeeAddress)) {
-        address = payeeAddress;
+    try {
+      const url = new URL(trimmed);
+      if (url.protocol === 'scp:' && url.host === 'pay') {
+        return parseScpDeepLink(url.search.replace(/^\?/, ''));
       }
 
-      if (!address) return null;
+      if (url.protocol === 'upi:' && url.host === 'pay') {
+        return parseUpiDeepLink(url.search.replace(/^\?/, ''));
+      }
 
+      const embeddedPayload =
+        url.searchParams.get('payload') ||
+        url.searchParams.get('data') ||
+        url.searchParams.get('qr') ||
+        url.searchParams.get('deep_link');
+
+      if (embeddedPayload) {
+        const decoded = decodeURIComponent(embeddedPayload);
+        if (decoded !== trimmed) {
+          const nested = parseQrPayload(decoded);
+          if (nested) {
+            return nested;
+          }
+        }
+      }
+
+      const addressCandidate =
+        url.searchParams.get('address') ||
+        url.searchParams.get('receiver') ||
+        url.searchParams.get('to') ||
+        url.searchParams.get('wallet');
+
+      if (addressCandidate && isAddress(addressCandidate)) {
+        return {
+          address: addressCandidate,
+          amount: normalizeScanAmount(url.searchParams.get('amount') || url.searchParams.get('am')),
+          note: url.searchParams.get('note') || url.searchParams.get('tn') || undefined,
+        };
+      }
+    } catch {
+      // Not a URL payload.
+    }
+
+    const walletMatch = trimmed.match(/(0x[a-fA-F0-9]{40})/);
+    if (walletMatch && isAddress(walletMatch[1])) {
       return {
-        address,
-        amount: params.get('am') || undefined,
-        note: params.get('tn') || params.get('pn') || undefined,
+        address: walletMatch[1],
       };
     }
 
@@ -435,6 +578,42 @@ export default function DashboardPage() {
     }
 
     return null;
+  };
+
+  const decodeQrImage = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setUploadingQr(true);
+      setScanError('');
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch('https://api.qrserver.com/v1/read-qr-code/', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error('Could not decode QR image right now. Please retry.');
+      }
+
+      const data = await response.json();
+      const symbol = data?.[0]?.symbol?.[0];
+
+      if (!symbol?.data || symbol.error) {
+        throw new Error(symbol?.error || 'No readable QR found in selected image.');
+      }
+
+      handleQrDetected(symbol.data);
+    } catch (err) {
+      setScanError(toUserFacingError(err));
+    } finally {
+      setUploadingQr(false);
+      event.target.value = '';
+    }
   };
 
 
@@ -446,8 +625,27 @@ export default function DashboardPage() {
   const handleUpiPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     const payee = resolveUpiPayee(upiId);
+
+    if (!payee && isAddress(upiId.trim())) {
+      await executePayment(upiId.trim(), amount, `UPI:${upiId}${note ? ` | ${note}` : ''}`, 'upi');
+      return;
+    }
+
+    if (!payee && upiId.startsWith('upi://pay?')) {
+      const parsed = parseQrPayload(upiId);
+      if (parsed) {
+        await executePayment(
+          parsed.address,
+          parsed.amount || amount,
+          parsed.note || note || 'UPI payment',
+          'upi'
+        );
+        return;
+      }
+    }
+
     if (!payee) {
-      setError('UPI ID not found. Pick a verified payee from suggestions.');
+      setError('UPI ID not found. Pick a verified payee, wallet address, or valid upi://pay payload.');
       return;
     }
 
@@ -570,35 +768,6 @@ export default function DashboardPage() {
     );
   }
 
-  const collectPayload = useMemo(() => {
-    const params = new URLSearchParams({
-      address: walletAddress,
-      note: collectNote.trim() || 'SecureChain transfer',
-    });
-
-    if (collectAmount && Number(collectAmount) > 0) {
-      params.set('amount', collectAmount);
-    }
-
-    return `scp://pay?${params.toString()}`;
-  }, [walletAddress, collectAmount, collectNote]);
-
-  const collectUpiPayload = useMemo(() => {
-    const params = new URLSearchParams({
-      pa: walletAddress,
-      pn: 'SecureChain Wallet',
-      tn: collectNote.trim() || 'SecureChain transfer',
-    });
-
-    if (collectAmount && Number(collectAmount) > 0) {
-      params.set('am', collectAmount);
-    }
-
-    return `upi://pay?${params.toString()}`;
-  }, [walletAddress, collectAmount, collectNote]);
-
-  const activeCollectPayload = collectFormat === 'upi' ? collectUpiPayload : collectPayload;
-
   return (
     <div className="min-h-screen px-3 py-4 md:py-8">
       <div className="wallet-shell rounded-[30px] soft-card">
@@ -650,6 +819,15 @@ export default function DashboardPage() {
         )}
 
         <main className="px-4 pb-24 pt-4">
+          {sending && (
+            <div className="mb-4 rounded-2xl border border-[var(--cloud-200)] bg-white/85 px-4 py-3 animate-pulse">
+              <p className="text-sm font-semibold text-[var(--ink-900)]">Processing payment...</p>
+              <p className="text-xs text-[var(--text-soft)] mt-1">
+                Approve MetaMask prompts to complete the transfer. Approval is handled automatically when required.
+              </p>
+            </div>
+          )}
+
           {showHomeTab && (
             <div className="animate-screen-enter">
               <div className="grid grid-cols-2 gap-3 mb-4">
@@ -957,6 +1135,17 @@ export default function DashboardPage() {
                 </button>
               </div>
 
+              <label className="mb-3 w-full block cursor-pointer rounded-xl border border-[var(--cloud-200)] bg-white px-3 py-2 text-sm font-semibold text-[var(--ink-700)] text-center hover:bg-[var(--cloud-100)]">
+                {uploadingQr ? 'Decoding QR image...' : 'Upload QR Image'}
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={decodeQrImage}
+                  disabled={uploadingQr}
+                />
+              </label>
+
               <textarea
                 value={manualPayload}
                 onChange={(e) => setManualPayload(e.target.value)}
@@ -966,8 +1155,9 @@ export default function DashboardPage() {
               />
               <button
                 type="button"
-                onClick={() => handleQrDetected(manualPayload)}
-                className="mt-2 w-full bg-[var(--cloud-100)] text-[var(--ink-700)] py-2 rounded-xl text-sm font-semibold"
+                onClick={() => handleQrDetected(manualPayload.trim())}
+                disabled={!manualPayload.trim()}
+                className="mt-2 w-full bg-[var(--cloud-100)] text-[var(--ink-700)] py-2 rounded-xl text-sm font-semibold disabled:opacity-50"
               >
                 Parse Manual Payload
               </button>
