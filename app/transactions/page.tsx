@@ -5,7 +5,12 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { AndroidBottomTabs, BottomTabKey } from '@/components/AndroidBottomTabs';
 import { useAuth } from '@/contexts/AuthContext';
-import { getTransactionsByWallet } from '@/lib/supabase/database';
+import {
+  getTransactionsByWallet,
+  subscribeToWalletTransactions,
+  unsubscribeWalletTransactions,
+} from '@/lib/supabase/database';
+import { isSupabaseConfigured, supabaseConfigMessage } from '@/lib/supabase/client';
 import { Transaction } from '@/lib/supabase/client';
 import { formatAddress, getEtherscanUrl, getEtherscanAddressUrl } from '@/lib/web3';
 import { findPayeeByWallet, getPayeeInitials } from '@/lib/upi/directory';
@@ -27,6 +32,13 @@ export default function TransactionsPage() {
 
     try {
       setLoading(true);
+
+      if (!isSupabaseConfigured) {
+        setTransactions([]);
+        setTotal(0);
+        return;
+      }
+
       const offset = (currentPage - 1) * ITEMS_PER_PAGE;
       const { transactions: txs, total: totalCount } = await getTransactionsByWallet(
         walletAddress,
@@ -41,6 +53,20 @@ export default function TransactionsPage() {
       setLoading(false);
     }
   }, [walletAddress, currentPage]);
+
+  useEffect(() => {
+    if (!walletAddress || !isSupabaseConfigured) {
+      return;
+    }
+
+    const channel = subscribeToWalletTransactions(walletAddress, () => {
+      void loadTransactions();
+    });
+
+    return () => {
+      unsubscribeWalletTransactions(channel);
+    };
+  }, [walletAddress, loadTransactions]);
 
   useEffect(() => {
     if (!user) {
@@ -88,6 +114,12 @@ export default function TransactionsPage() {
         </header>
 
         <main className="px-4 py-4 pb-24">
+          {!isSupabaseConfigured && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 mb-4">
+              Realtime history is unavailable. {supabaseConfigMessage || 'Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'}
+            </div>
+          )}
+
           <div className="soft-card p-4 mb-4 flex items-center justify-between">
             <div>
               <p className="text-xs text-[var(--text-soft)]">Wallet Explorer</p>
@@ -137,7 +169,6 @@ export default function TransactionsPage() {
                   const payee = findPayeeByWallet(otherParty);
                   const avatarLabel = payee ? getPayeeInitials(payee.name) : formatAddress(otherParty, 1).replace('0x', '').slice(0, 2).toUpperCase();
                   const accent = payee ? payee.accent : 'from-slate-500 to-slate-600';
-                  const isLocalReceipt = tx.tx_hash.startsWith('demo-');
 
                   return (
                     <div
@@ -183,11 +214,7 @@ export default function TransactionsPage() {
                         {new Date(tx.created_at).toLocaleString()}
                       </p>
 
-                      {isLocalReceipt ? (
-                        <span className="inline-flex text-xs font-semibold rounded-full px-2 py-1 bg-sky-100 text-sky-700">
-                          Local receipt: {tx.tx_hash}
-                        </span>
-                      ) : (
+                      {tx.tx_hash.startsWith('0x') ? (
                         <a
                           href={getEtherscanUrl(tx.tx_hash)}
                           target="_blank"
@@ -196,6 +223,10 @@ export default function TransactionsPage() {
                         >
                           Tx: {formatAddress(tx.tx_hash, 7)}
                         </a>
+                      ) : (
+                        <span className="inline-flex text-xs font-semibold rounded-full px-2 py-1 bg-[var(--cloud-100)] text-[var(--text-soft)]">
+                          Tx: {tx.tx_hash}
+                        </span>
                       )}
                     </div>
                   );

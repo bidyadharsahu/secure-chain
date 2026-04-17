@@ -4,8 +4,6 @@ import { SecureChainPaymentABI } from '../contracts/SecureChainPaymentABI';
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 const DEMO_ETH_USD_PRICE = '3500.00';
-const DEMO_FAUCET_AMOUNT = '100';
-const DEMO_STORAGE_PREFIX = 'secure-chain:demo';
 
 const normalizeEnvValue = (value?: string) => {
   if (!value) return undefined;
@@ -25,77 +23,6 @@ const isConfiguredAddress = (value?: string) => {
   return isAddress(normalized);
 };
 
-const getStorage = () => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  try {
-    return window.localStorage;
-  } catch {
-    return null;
-  }
-};
-
-const getDemoBalanceKey = (address: string) => `${DEMO_STORAGE_PREFIX}:balance:${address.toLowerCase()}`;
-const getDemoApprovalKey = (address: string) => `${DEMO_STORAGE_PREFIX}:approval:${address.toLowerCase()}`;
-
-const readStoredValue = (key: string, fallback: string) => {
-  const storage = getStorage();
-  if (!storage) return fallback;
-
-  const value = storage.getItem(key);
-  return value ?? fallback;
-};
-
-const writeStoredValue = (key: string, value: string) => {
-  const storage = getStorage();
-  if (!storage) return;
-
-  storage.setItem(key, value);
-};
-
-const makeRandomId = () => {
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    const bytes = new Uint8Array(8);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes)
-      .map((byte) => byte.toString(16).padStart(2, '0'))
-      .join('');
-  }
-
-  return Math.random().toString(16).slice(2, 18);
-};
-
-const createDemoReceipt = (kind: 'faucet' | 'approve' | 'payment') => ({
-  hash: `demo-${kind}-${Date.now().toString(36)}-${makeRandomId()}`,
-  blockNumber: Math.floor(Date.now() / 1000),
-  gasUsed: 21000,
-  gasPrice: 0,
-});
-
-const getDemoBalance = (address: string) => readStoredValue(getDemoBalanceKey(address), '0');
-
-const setDemoBalance = (address: string, nextBalance: string) => {
-  writeStoredValue(getDemoBalanceKey(address), nextBalance);
-};
-
-const addDemoBalance = (address: string, delta: string) => {
-  const currentBalance = Number(getDemoBalance(address));
-  const deltaValue = Number(delta);
-  const nextBalance = Number.isFinite(currentBalance) && Number.isFinite(deltaValue)
-    ? Math.max(0, currentBalance + deltaValue)
-    : 0;
-
-  const normalizedBalance = nextBalance.toFixed(6);
-  setDemoBalance(address, normalizedBalance);
-  return normalizedBalance;
-};
-
-const setDemoApproval = (address: string, amount: string) => {
-  writeStoredValue(getDemoApprovalKey(address), amount);
-};
-
 const getConfiguredPaymentAddress = () => {
   const paymentAddress = normalizeEnvValue(process.env.NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS);
   if (!isConfiguredAddress(paymentAddress)) {
@@ -104,6 +31,29 @@ const getConfiguredPaymentAddress = () => {
 
   return paymentAddress!;
 };
+
+function getLiveConfigError(): string {
+  const missing: string[] = [];
+  if (!hasSCPTokenConfig()) {
+    missing.push('NEXT_PUBLIC_SCP_TOKEN_ADDRESS');
+  }
+  if (!hasPaymentContractConfig()) {
+    missing.push('NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS');
+  }
+
+  if (missing.length === 0) {
+    return '';
+  }
+
+  return `Missing live blockchain configuration: ${missing.join(', ')}. Deploy contracts and set these environment variables.`;
+}
+
+function assertLiveWeb3Config() {
+  const errorMessage = getLiveConfigError();
+  if (errorMessage) {
+    throw new Error(errorMessage);
+  }
+}
 
 export function hasSCPTokenConfig() {
   return isConfiguredAddress(process.env.NEXT_PUBLIC_SCP_TOKEN_ADDRESS);
@@ -118,7 +68,7 @@ export function hasLiveWeb3Config() {
 }
 
 export function isDemoMode() {
-  return !hasLiveWeb3Config();
+  return false;
 }
 
 export function isDemoReceiptHash(txHash: string) {
@@ -235,7 +185,7 @@ export async function switchToSepolia() {
  */
 export async function getSCPBalance(address: string): Promise<string> {
   if (!hasSCPTokenConfig()) {
-    return getDemoBalance(address);
+    throw new Error('SCP token contract address is not configured. Set NEXT_PUBLIC_SCP_TOKEN_ADDRESS.');
   }
 
   const provider = getProvider();
@@ -248,12 +198,7 @@ export async function getSCPBalance(address: string): Promise<string> {
  * Approve SCP tokens for payment contract
  */
 export async function approveSCPTokens(amount: string): Promise<any> {
-  if (!hasLiveWeb3Config()) {
-    const signer = await getSigner();
-    const address = await signer.getAddress();
-    setDemoApproval(address, amount);
-    return createDemoReceipt('approve');
-  }
+  assertLiveWeb3Config();
 
   const signer = await getSigner();
   const contract = getSCPTokenContract(signer);
@@ -269,10 +214,7 @@ export async function approveSCPTokens(amount: string): Promise<any> {
  */
 export async function claimFromFaucet(): Promise<any> {
   if (!hasSCPTokenConfig()) {
-    const signer = await getSigner();
-    const address = await signer.getAddress();
-    addDemoBalance(address, DEMO_FAUCET_AMOUNT);
-    return createDemoReceipt('faucet');
+    throw new Error('SCP token contract address is not configured. Set NEXT_PUBLIC_SCP_TOKEN_ADDRESS.');
   }
 
   const signer = await getSigner();
@@ -289,28 +231,7 @@ export async function sendPayment(
   amount: string,
   note: string = ''
 ): Promise<any> {
-  if (!hasLiveWeb3Config()) {
-    if (!isAddress(receiver)) {
-      throw new Error('Receiver wallet address is invalid');
-    }
-
-    const signer = await getSigner();
-    const senderAddress = await signer.getAddress();
-    const amountValue = Number(amount);
-
-    if (!Number.isFinite(amountValue) || amountValue <= 0) {
-      throw new Error('Enter a valid amount greater than 0');
-    }
-
-    const currentBalance = Number(getDemoBalance(senderAddress));
-    if (currentBalance < amountValue) {
-      throw new Error('Insufficient demo balance. Claim the faucet first.');
-    }
-
-    setDemoBalance(senderAddress, (currentBalance - amountValue).toFixed(6));
-    addDemoBalance(receiver, amount);
-    return createDemoReceipt('payment');
-  }
+  assertLiveWeb3Config();
 
   const signer = await getSigner();
   const signerAddress = await signer.getAddress();
@@ -334,7 +255,7 @@ export async function sendPayment(
  */
 export async function getETHUSDPrice(): Promise<string> {
   if (!hasPaymentContractConfig()) {
-    return DEMO_ETH_USD_PRICE;
+    throw new Error('Payment contract address is not configured. Set NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS.');
   }
 
   const provider = getProvider();

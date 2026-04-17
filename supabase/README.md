@@ -25,6 +25,15 @@ This will create:
 - Indexes for optimized queries
 - A view for transaction history
 
+### For Existing Deployments
+
+If your tables already exist and transactions are not appearing in history, run `production_patch.sql` from this folder in Supabase SQL Editor.
+
+It applies safe production fixes:
+- Enforces lowercase wallet address matching
+- Repairs transaction RLS policy matching
+- Enables realtime publication for `transactions`
+
 ## Step 2: Configure Authentication
 
 1. Go to Authentication → Providers in Supabase dashboard
@@ -73,6 +82,15 @@ The schema already includes RLS policies, but verify they're active:
 **transactions:**
 - Users can view transactions where they are sender or receiver
 - Users can insert transactions from their own wallets
+
+### Realtime Requirements
+
+To receive live transaction updates in-app:
+1. Ensure `transactions` table has Realtime enabled in Supabase dashboard (Database -> Replication).
+2. Ensure `transactions` is included in publication `supabase_realtime`.
+3. Ensure `REPLICA IDENTITY FULL` is set for `transactions`.
+
+The provided `production_patch.sql` configures these automatically.
 
 **user_profiles:**
 - All users can view all profiles

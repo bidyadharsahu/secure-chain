@@ -17,14 +17,16 @@ import {
   formatAddress,
   getEtherscanUrl,
   hasLiveWeb3Config,
-  isDemoReceiptHash,
 } from '@/lib/web3';
 import {
   getTransactionsByWallet,
   saveTransaction,
+  subscribeToWalletTransactions,
+  unsubscribeWalletTransactions,
   updateTransactionStatus,
   logEvent,
 } from '@/lib/supabase/database';
+import { isSupabaseConfigured, supabaseConfigMessage } from '@/lib/supabase/client';
 import { Transaction } from '@/lib/supabase/client';
 import {
   UPI_DIRECTORY,
@@ -82,8 +84,8 @@ export default function DashboardPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const showHomeTab = activeTab !== 'scan' && activeTab !== 'profile';
-  const limitedMode = !hasLiveWeb3Config();
-  const canTransact = limitedMode || isCorrectNetwork;
+  const liveConfigReady = hasLiveWeb3Config();
+  const canTransact = liveConfigReady && isCorrectNetwork;
 
   const validRecentTransactions = useMemo(
     () =>
@@ -171,6 +173,18 @@ export default function DashboardPage() {
       return 'Switch MetaMask to Sepolia network and try again.';
     }
 
+    if (
+      normalized.includes('database table missing') ||
+      normalized.includes('permission denied while saving transaction') ||
+      normalized.includes('permission denied while updating transaction status')
+    ) {
+      return `${message} Ensure Supabase schema and RLS are configured for realtime history.`;
+    }
+
+    if (normalized.includes('missing live blockchain configuration')) {
+      return 'Live contract addresses are missing. Set NEXT_PUBLIC_SCP_TOKEN_ADDRESS and NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS, then redeploy.';
+    }
+
     return message;
   };
 
@@ -200,10 +214,14 @@ export default function DashboardPage() {
     if (!walletAddress) return;
 
     try {
+      const transactionsPromise = isSupabaseConfigured
+        ? getTransactionsByWallet(walletAddress, 5, 0)
+        : Promise.resolve({ transactions: [], total: 0 });
+
       const [balanceResult, priceResult, transactionsResult] = await Promise.allSettled([
         getSCPBalance(walletAddress),
         getETHUSDPrice(),
-        getTransactionsByWallet(walletAddress, 5, 0),
+        transactionsPromise,
       ] as const);
 
       const nextBalance = balanceResult.status === 'fulfilled' ? balanceResult.value : '0';
@@ -373,6 +391,20 @@ export default function DashboardPage() {
     };
   }, [walletAddress, loadDashboardData, loadChainPulse]);
 
+  useEffect(() => {
+    if (!walletAddress || !isSupabaseConfigured) {
+      return;
+    }
+
+    const channel = subscribeToWalletTransactions(walletAddress, () => {
+      void loadDashboardData();
+    });
+
+    return () => {
+      unsubscribeWalletTransactions(channel);
+    };
+  }, [walletAddress, loadDashboardData]);
+
   const resetForms = () => {
     setReceiver('');
     setAmount('');
@@ -388,6 +420,11 @@ export default function DashboardPage() {
     finalNote: string,
     mode: string
   ) => {
+    if (!liveConfigReady) {
+      setError('Live contracts are not configured. Set NEXT_PUBLIC_SCP_TOKEN_ADDRESS and NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS.');
+      return;
+    }
+
     if (!isAddress(finalReceiver)) {
       setError('Receiver wallet address is invalid');
       return;
@@ -401,18 +438,21 @@ export default function DashboardPage() {
     try {
       setSending(true);
       setError('');
-      setSuccess(
-        limitedMode
-          ? 'Processing local payment...'
-          : 'Opening MetaMask. Approve token access (if prompted), then approve payment.'
-      );
+      setSuccess('Opening MetaMask. Approve token access (if prompted), then approve payment.');
 
       const currentPrice = await getETHUSDPrice();
       const receipt = await sendPayment(finalReceiver, finalAmount, finalNote);
+      const txHash = receipt?.hash || receipt?.transactionHash;
+
+      if (!txHash) {
+        throw new Error('Payment broadcast succeeded but transaction hash is unavailable.');
+      }
+
+      let historySyncError = '';
 
       try {
         await saveTransaction({
-          tx_hash: receipt.hash,
+          tx_hash: txHash,
           sender_address: walletAddress!,
           receiver_address: finalReceiver,
           amount: finalAmount,
@@ -422,7 +462,7 @@ export default function DashboardPage() {
         });
 
         await updateTransactionStatus(
-          receipt.hash,
+          txHash,
           'confirmed',
           receipt.blockNumber,
           Number(receipt.gasUsed),
@@ -430,17 +470,18 @@ export default function DashboardPage() {
         );
       } catch (persistError) {
         console.warn('Unable to persist payment transaction:', persistError);
+        historySyncError = toUserFacingError(persistError);
       }
 
       setSuccess(
-        limitedMode
-          ? `Payment saved locally. Tx: ${receipt.hash}`
-          : `Payment confirmed on-chain. Tx: ${receipt.hash}`
+        historySyncError
+          ? `Payment confirmed on-chain. Tx: ${txHash}. History sync failed: ${historySyncError}`
+          : `Payment confirmed on-chain. Tx: ${txHash}`
       );
 
       try {
         await logEvent('payment_sent', {
-          tx_hash: receipt.hash,
+          tx_hash: txHash,
           receiver: finalReceiver,
           amount: finalAmount,
           mode,
@@ -664,11 +705,8 @@ export default function DashboardPage() {
       setSuccess('');
 
       const receipt = await claimFromFaucet();
-      setSuccess(
-        limitedMode
-          ? `Faucet credited with 100 SCP. Tx: ${receipt.hash}`
-          : `Successfully claimed 100 SCP. Tx: ${receipt.hash}`
-      );
+      const txHash = receipt?.hash || receipt?.transactionHash || 'unknown';
+      setSuccess(`Successfully claimed 100 SCP. Tx: ${txHash}`);
 
       try {
         await logEvent('faucet_claimed', { tx_hash: receipt.hash });
@@ -690,11 +728,7 @@ export default function DashboardPage() {
       setError('');
       setSuccess('');
       await approveSCPTokens('1000000');
-      setSuccess(
-        limitedMode
-          ? 'Approval saved locally. Complete contract setup to enable live approvals.'
-          : 'Successfully approved SCP tokens for transfers'
-      );
+      setSuccess('Successfully approved SCP tokens for transfers.');
 
       try {
         await logEvent('tokens_approved');
@@ -802,14 +836,26 @@ export default function DashboardPage() {
 
           <div className="mt-4 flex items-center justify-between text-xs">
             <div className="flex items-center gap-2 text-white/90">
-              <span className={`pulse-dot ${limitedMode ? 'bg-sky-300' : isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
-              <span>{limitedMode ? 'Local fallback mode' : isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
+              <span className={`pulse-dot ${isCorrectNetwork ? 'bg-[var(--mint-300)]' : 'bg-amber-300'}`}></span>
+              <span>{isCorrectNetwork ? 'Sepolia Connected' : 'Wrong Network'}</span>
             </div>
             <span className="text-white/75">Block #{chainBlock}</span>
           </div>
         </header>
 
-        {!limitedMode && !isCorrectNetwork && (
+        {!liveConfigReady && (
+          <div className="mx-4 mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            Live blockchain mode is disabled. Set NEXT_PUBLIC_SCP_TOKEN_ADDRESS and NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS with deployed Sepolia contracts.
+          </div>
+        )}
+
+        {!isSupabaseConfigured && (
+          <div className="mx-4 mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            Realtime history is not configured. {supabaseConfigMessage || 'Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'}
+          </div>
+        )}
+
+        {liveConfigReady && !isCorrectNetwork && (
           <div className="mx-4 mt-4 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 flex items-center justify-between gap-3">
             <span>Switch to Sepolia to make payments.</span>
             <button onClick={switchNetwork} className="bg-amber-600 text-white text-xs px-3 py-2 rounded-xl">
@@ -1080,14 +1126,14 @@ export default function DashboardPage() {
                             </span>
                           </div>
                         </div>
-                        {isDemoReceiptHash(tx.tx_hash) ? (
-                          <span className="text-xs mt-2 inline-flex rounded-full bg-sky-100 text-sky-700 px-2 py-1">
-                            Local receipt
-                          </span>
-                        ) : (
+                          {tx.tx_hash.startsWith('0x') ? (
                           <a href={getEtherscanUrl(tx.tx_hash)} target="_blank" rel="noopener noreferrer" className="text-xs mt-2 inline-block text-[var(--ink-700)] hover:underline">
                             Explorer: {formatAddress(tx.tx_hash, 5)}
                           </a>
+                          ) : (
+                            <span className="text-xs mt-2 inline-flex rounded-full bg-[var(--cloud-100)] text-[var(--text-soft)] px-2 py-1">
+                              Tx: {tx.tx_hash}
+                            </span>
                         )}
                       </div>
                     );

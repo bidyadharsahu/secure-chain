@@ -74,6 +74,8 @@ NEXT_PUBLIC_SCP_TOKEN_ADDRESS=0x...
 2. Copy the deployed contract address
 3. Paste here
 
+⚠️ **Required for live payments**: without this value, the app blocks token transfers.
+
 #### NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS
 - **Description**: Deployed SecureChainPayment contract address
 - **When to set**: After deploying SecureChainPayment.sol via Remix
@@ -87,6 +89,8 @@ NEXT_PUBLIC_PAYMENT_CONTRACT_ADDRESS=0x...
 1. Deploy SecureChainPayment.sol in Remix IDE
 2. Copy the deployed contract address
 3. Paste here
+
+⚠️ **Required for live payments**: without this value, the app blocks payment execution.
 
 ---
 

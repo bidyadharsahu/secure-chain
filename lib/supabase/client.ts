@@ -50,6 +50,15 @@ export const supabaseConfigMessage = isSupabaseConfigured
   ? ''
   : `Supabase is not configured correctly: ${configIssues.join('; ')}. Update environment variables and redeploy.`;
 
+export function assertSupabaseConfigured() {
+  if (!isSupabaseConfigured) {
+    throw new Error(
+      supabaseConfigMessage ||
+        'Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'
+    );
+  }
+}
+
 if (!isSupabaseConfigured) {
   console.warn(supabaseConfigMessage);
 }

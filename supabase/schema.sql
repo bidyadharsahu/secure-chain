@@ -41,6 +41,28 @@ CREATE INDEX idx_transactions_tx_hash ON transactions(tx_hash);
 CREATE INDEX idx_transactions_created_at ON transactions(created_at DESC);
 CREATE INDEX idx_transactions_status ON transactions(status);
 
+-- Normalize existing wallet addresses to lowercase for consistent matching
+UPDATE user_wallets
+SET wallet_address = LOWER(wallet_address);
+
+UPDATE transactions
+SET
+    sender_address = LOWER(sender_address),
+    receiver_address = LOWER(receiver_address);
+
+-- Enforce lowercase wallet addresses at write time
+ALTER TABLE user_wallets
+    ADD CONSTRAINT user_wallets_wallet_address_lowercase
+    CHECK (wallet_address = LOWER(wallet_address));
+
+ALTER TABLE transactions
+    ADD CONSTRAINT transactions_sender_address_lowercase
+    CHECK (sender_address = LOWER(sender_address));
+
+ALTER TABLE transactions
+    ADD CONSTRAINT transactions_receiver_address_lowercase
+    CHECK (receiver_address = LOWER(receiver_address));
+
 -- User Profiles Table (optional - for additional user metadata)
 CREATE TABLE user_profiles (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
@@ -77,11 +99,40 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION normalize_user_wallet_address()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.wallet_address = LOWER(NEW.wallet_address);
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION normalize_transaction_wallet_addresses()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.sender_address = LOWER(NEW.sender_address);
+    NEW.receiver_address = LOWER(NEW.receiver_address);
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 -- Triggers for updated_at
 CREATE TRIGGER update_user_wallets_updated_at
     BEFORE UPDATE ON user_wallets
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER normalize_user_wallet_address
+    BEFORE INSERT OR UPDATE ON user_wallets
+    FOR EACH ROW
+    EXECUTE FUNCTION normalize_user_wallet_address();
+
+CREATE TRIGGER normalize_transaction_wallet_addresses
+    BEFORE INSERT OR UPDATE ON transactions
+    FOR EACH ROW
+    EXECUTE FUNCTION normalize_transaction_wallet_addresses();
 
 CREATE TRIGGER update_user_profiles_updated_at
     BEFORE UPDATE ON user_profiles
@@ -113,20 +164,20 @@ CREATE POLICY "Users can update their own wallets"
 CREATE POLICY "Users can view transactions they're involved in"
     ON transactions FOR SELECT
     USING (
-        sender_address IN (SELECT wallet_address FROM user_wallets WHERE user_id = auth.uid())
-        OR receiver_address IN (SELECT wallet_address FROM user_wallets WHERE user_id = auth.uid())
+        LOWER(sender_address) IN (SELECT LOWER(wallet_address) FROM user_wallets WHERE user_id = auth.uid())
+        OR LOWER(receiver_address) IN (SELECT LOWER(wallet_address) FROM user_wallets WHERE user_id = auth.uid())
     );
 
 CREATE POLICY "Users can insert transactions from their wallets"
     ON transactions FOR INSERT
     WITH CHECK (
-        sender_address IN (SELECT wallet_address FROM user_wallets WHERE user_id = auth.uid())
+        LOWER(sender_address) IN (SELECT LOWER(wallet_address) FROM user_wallets WHERE user_id = auth.uid())
     );
 
 CREATE POLICY "Users can update their own transactions"
     ON transactions FOR UPDATE
     USING (
-        sender_address IN (SELECT wallet_address FROM user_wallets WHERE user_id = auth.uid())
+        LOWER(sender_address) IN (SELECT LOWER(wallet_address) FROM user_wallets WHERE user_id = auth.uid())
     );
 
 -- User Profiles Policies
@@ -168,3 +219,23 @@ ORDER BY t.created_at DESC;
 
 -- Grant access to the view
 GRANT SELECT ON user_transaction_history TO authenticated;
+
+-- Realtime support for transaction history subscriptions
+ALTER TABLE transactions REPLICA IDENTITY FULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_publication_tables
+        WHERE pubname = 'supabase_realtime'
+          AND schemaname = 'public'
+          AND tablename = 'transactions'
+    ) THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE transactions;
+    END IF;
+EXCEPTION
+    WHEN undefined_object THEN
+        RAISE NOTICE 'supabase_realtime publication not found. Enable Realtime in Supabase dashboard for transactions table.';
+END
+$$;

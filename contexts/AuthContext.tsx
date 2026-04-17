@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { isSupabaseConfigured, supabase, supabaseConfigMessage } from '@/lib/supabase/client';
 import { User } from '@supabase/supabase-js';
 import { linkWalletToUser, getUserWallet, logEvent } from '@/lib/supabase/database';
@@ -91,6 +91,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [linkedWallet, setLinkedWallet] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const persistWalletLink = useCallback(async (address: string) => {
+    if (!user) {
+      return;
+    }
+
+    try {
+      await linkWalletToUser(address);
+      setLinkedWallet(address);
+      await logEvent('wallet_linked', { wallet_address: address });
+    } catch (linkError) {
+      console.warn('Wallet connected but could not persist wallet link in Supabase:', linkError);
+    }
+  }, [user]);
+
   useEffect(() => {
     // Check active sessions and sets the user
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -116,6 +130,47 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     return () => subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.ethereum) {
+      return;
+    }
+
+    const provider: any =
+      (window.ethereum as any)?.providers?.find?.((p: any) => p?.isMetaMask) || window.ethereum;
+
+    const syncConnectedAccount = async () => {
+      try {
+        const accounts = await provider.request({ method: 'eth_accounts' });
+        const currentAddress = accounts?.[0] || null;
+        setWalletAddress(currentAddress);
+
+        if (currentAddress) {
+          await persistWalletLink(currentAddress);
+        }
+      } catch (error) {
+        console.warn('Failed to restore wallet connection:', error);
+      }
+    };
+
+    const handleAccountsChanged = (accounts: string[]) => {
+      const nextAddress = accounts?.[0] || null;
+      setWalletAddress(nextAddress);
+
+      if (nextAddress) {
+        void persistWalletLink(nextAddress);
+      } else {
+        setLinkedWallet(null);
+      }
+    };
+
+    void syncConnectedAccount();
+    provider.on?.('accountsChanged', handleAccountsChanged);
+
+    return () => {
+      provider.removeListener?.('accountsChanged', handleAccountsChanged);
+    };
+  }, [persistWalletLink]);
 
   // Load linked wallet from database
   const loadLinkedWallet = async () => {
@@ -249,15 +304,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setWalletAddress(address);
 
       // If user is logged in, link wallet to user
-      if (user) {
-        try {
-          await linkWalletToUser(address);
-        } catch (linkError) {
-          console.warn('Wallet connected but could not persist wallet link in Supabase:', linkError);
-        }
-        setLinkedWallet(address);
-        await logEvent('wallet_linked', { wallet_address: address });
-      }
+      await persistWalletLink(address);
 
       return address;
     } catch (error) {
