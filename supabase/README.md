@@ -43,6 +43,19 @@ It applies safe production fixes:
    - Go to Authentication → Email Templates
    - Customize the confirmation and recovery emails
 
+### Required URL Configuration (critical)
+
+Go to Authentication → URL Configuration and set:
+
+- **Site URL**: your app base URL
+   - Example production: `https://secure-chain-three.vercel.app`
+   - Example local: `http://localhost:3000`
+- **Redirect URLs**: include callback URL(s)
+   - `https://secure-chain-three.vercel.app/auth/callback`
+   - `http://localhost:3000/auth/callback`
+
+If these are missing, signup/reset may fail with redirect URL errors.
+
 ### Email Authentication Settings
 
 Go to Authentication → Settings:
@@ -50,12 +63,18 @@ Go to Authentication → Settings:
 - **Enable Signup**: Enabled
 - **Minimum Password Length**: 8 characters recommended
 
+### Email Delivery (why signup mail may not arrive)
+
+- For quick testing: use Supabase default email service.
+- For production reliability: configure custom SMTP under Authentication → SMTP Settings.
+- Always check Spam/Promotions folders for confirmation/reset emails.
+
 ## Step 3: Get Your Supabase Credentials
 
 1. Go to Settings → API in your Supabase dashboard
 2. Copy the following values:
    - **Project URL** (e.g., `https://xxxxx.supabase.co`)
-   - **Anon/Public Key** (anon key)
+   - **Anon/Public Key** (recommended: anon key)
 
 3. Update your `.env` file:
 ```env

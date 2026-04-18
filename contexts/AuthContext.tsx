@@ -35,6 +35,22 @@ const isAuthNetworkError = (message?: string) => {
 const authNetworkErrorMessage =
   'Unable to reach authentication server. Verify Supabase URL/key in Vercel and ensure values are valid (no quotes or placeholder values).';
 
+const isRedirectUrlError = (message?: string) => {
+  const normalized = message?.toLowerCase() || '';
+  return (
+    normalized.includes('redirect') &&
+    (normalized.includes('not allowed') ||
+      normalized.includes('not whitelisted') ||
+      normalized.includes('does not match') ||
+      normalized.includes('invalid'))
+  );
+};
+
+const getAuthRedirectHelpMessage = () => {
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '<your-app-url>';
+  return `Supabase auth redirect URL is not configured. In Supabase Authentication -> URL Configuration, set Site URL to ${currentOrigin} and add ${currentOrigin}/auth/callback to Redirect URLs.`;
+};
+
 const getAuthErrorMessage = (error: { message?: string } | null) => {
   const message = error?.message || '';
   const normalized = message.toLowerCase();
@@ -45,6 +61,26 @@ const getAuthErrorMessage = (error: { message?: string } | null) => {
 
   if (isAuthNetworkError(message)) {
     return authNetworkErrorMessage;
+  }
+
+  if (isRedirectUrlError(message)) {
+    return getAuthRedirectHelpMessage();
+  }
+
+  if (normalized.includes('signups not allowed') || normalized.includes('signup is disabled')) {
+    return 'Email signups are disabled in Supabase. Go to Authentication -> Providers -> Email and enable email signup.';
+  }
+
+  if (normalized.includes('invalid login credentials')) {
+    return 'Invalid email or password. If you just registered, verify your email first.';
+  }
+
+  if (normalized.includes('email not confirmed')) {
+    return 'Please confirm your email before signing in. Use the resend confirmation button if needed.';
+  }
+
+  if (normalized.includes('captcha')) {
+    return 'Signup is blocked by CAPTCHA settings. Disable Auth CAPTCHA in Supabase or integrate CAPTCHA token handling in the app.';
   }
 
   if (normalized.includes('rate limit') || normalized.includes('too many requests')) {
@@ -203,18 +239,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       throw new Error(getSupabaseConfigError());
     }
 
+    if (password.length < 8) {
+      throw new Error('Password must be at least 8 characters long.');
+    }
+
     const emailRedirectTo =
       typeof window !== 'undefined'
         ? `${window.location.origin}/auth/callback?confirmed=1`
         : undefined;
 
-    const { data, error } = await supabase.auth.signUp({
+    let { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         emailRedirectTo,
       },
     });
+
+    // Some new Supabase projects reject redirect URLs until URL configuration is set.
+    // Retry without custom redirect so account creation is not blocked.
+    if (error && isRedirectUrlError(error.message)) {
+      const retry = await supabase.auth.signUp({ email, password });
+      data = retry.data;
+      error = retry.error;
+    }
 
     if (error) {
       throw new Error(getAuthErrorMessage(error));
@@ -244,13 +292,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ? `${window.location.origin}/auth/callback?confirmed=1`
         : undefined;
 
-    const { error } = await supabase.auth.resend({
+    let { error } = await supabase.auth.resend({
       type: 'signup',
       email,
       options: {
         emailRedirectTo,
       },
     });
+
+    if (error && isRedirectUrlError(error.message)) {
+      const retry = await supabase.auth.resend({
+        type: 'signup',
+        email,
+      });
+      error = retry.error;
+    }
 
     if (error) {
       throw new Error(getAuthErrorMessage(error));
@@ -266,9 +322,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const redirectTo =
       typeof window !== 'undefined' ? `${window.location.origin}/auth/callback?reset=1` : undefined;
 
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+    let { error } = await supabase.auth.resetPasswordForEmail(email, {
       redirectTo,
     });
+
+    if (error && isRedirectUrlError(error.message)) {
+      const retry = await supabase.auth.resetPasswordForEmail(email);
+      error = retry.error;
+    }
 
     if (error) {
       throw new Error(getAuthErrorMessage(error));
